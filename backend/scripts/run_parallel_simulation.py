@@ -66,6 +66,7 @@ if sys.platform == 'win32':
 
 import argparse
 import asyncio
+import copy
 import json
 import logging
 import multiprocessing
@@ -200,6 +201,56 @@ REDDIT_ACTIONS = [
     ActionType.FOLLOW,
     ActionType.MUTE,
 ]
+
+
+def _sanitize_tool_schema(tool) -> bool:
+    """Patch zero-arg tool schemas that OpenAI-compatible endpoints reject."""
+    try:
+        schema = copy.deepcopy(tool.get_openai_tool_schema())
+    except Exception:
+        return False
+
+    function_schema = schema.get("function") or {}
+    parameters = function_schema.get("parameters") or {}
+    if not isinstance(parameters, dict):
+        return False
+
+    if parameters.get("properties") != {} or parameters.get("required") != []:
+        return False
+
+    sanitized_parameters = dict(parameters)
+    sanitized_parameters.setdefault("properties", {})
+    sanitized_parameters.pop("required", None)
+    sanitized_schema = dict(schema)
+    sanitized_schema["function"] = {
+        **function_schema,
+        "parameters": sanitized_parameters,
+    }
+    tool.get_openai_tool_schema = (
+        lambda _schema=copy.deepcopy(sanitized_schema): copy.deepcopy(_schema)
+    )
+    return True
+
+
+def _sanitize_agent_tool_schemas(agent_graph) -> int:
+    """Normalize generated tool schemas before any env.step() calls."""
+    if agent_graph is None:
+        return 0
+
+    patched = 0
+    seen_tools = set()
+    for _agent_id, agent in agent_graph.get_agents():
+        tool_candidates = list(getattr(agent, "action_tools", []) or [])
+        tool_candidates.extend((getattr(agent, "_internal_tools", {}) or {}).values())
+        for tool in tool_candidates:
+            tool_id = id(tool)
+            if tool_id in seen_tools:
+                continue
+            seen_tools.add(tool_id)
+            if _sanitize_tool_schema(tool):
+                patched += 1
+
+    return patched
 
 
 # IPC相关常量
@@ -1140,6 +1191,9 @@ async def run_twitter_simulation(
         model=model,
         available_actions=TWITTER_ACTIONS,
     )
+    patched_tools = _sanitize_agent_tool_schemas(result.agent_graph)
+    if patched_tools:
+        log_info(f"已修正 {patched_tools} 个 zero-arg tool schema（兼容 OpenAI tool calling）")
     
     # 从配置文件获取 Agent 真实名称映射（使用 entity_name 而非默认的 Agent_X）
     agent_names = get_agent_names_from_config(config)
@@ -1331,6 +1385,9 @@ async def run_reddit_simulation(
         model=model,
         available_actions=REDDIT_ACTIONS,
     )
+    patched_tools = _sanitize_agent_tool_schemas(result.agent_graph)
+    if patched_tools:
+        log_info(f"已修正 {patched_tools} 个 zero-arg tool schema（兼容 OpenAI tool calling）")
     
     # 从配置文件获取 Agent 真实名称映射（使用 entity_name 而非默认的 Agent_X）
     agent_names = get_agent_names_from_config(config)

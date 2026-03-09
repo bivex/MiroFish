@@ -910,9 +910,9 @@ Important:
                     else:
                         # Twitter CSV 格式
                         import csv
-                        profiles_data = [p.to_twitter_format() for p in existing_profiles]
+                        profiles_data = self._build_twitter_csv_rows(existing_profiles)
                         if profiles_data:
-                            fieldnames = list(profiles_data[0].keys())
+                            fieldnames = ['user_id', 'name', 'username', 'user_char', 'description']
                             with open(realtime_output_path, 'w', encoding='utf-8', newline='') as f:
                                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                                 writer.writeheader()
@@ -1066,6 +1066,25 @@ Important:
             self._save_twitter_csv(profiles, file_path)
         else:
             self._save_reddit_json(profiles, file_path)
+
+    @staticmethod
+    def _build_twitter_csv_rows(profiles: List[OasisAgentProfile]) -> List[Dict[str, Any]]:
+        """构建符合 OASIS 要求的 Twitter CSV 行。"""
+        rows: List[Dict[str, Any]] = []
+        for idx, profile in enumerate(profiles):
+            user_char = profile.bio
+            if profile.persona and profile.persona != profile.bio:
+                user_char = f"{profile.bio} {profile.persona}"
+            user_char = user_char.replace('\n', ' ').replace('\r', ' ')
+            description = profile.bio.replace('\n', ' ').replace('\r', ' ')
+            rows.append({
+                'user_id': idx,
+                'name': profile.name,
+                'username': profile.user_name,
+                'user_char': user_char,
+                'description': description,
+            })
+        return rows
     
     def _save_twitter_csv(self, profiles: List[OasisAgentProfile], file_path: str):
         """
@@ -1096,23 +1115,13 @@ Important:
             writer.writerow(headers)
             
             # 写入数据行
-            for idx, profile in enumerate(profiles):
-                # user_char: 完整人设（bio + persona），用于LLM系统提示
-                user_char = profile.bio
-                if profile.persona and profile.persona != profile.bio:
-                    user_char = f"{profile.bio} {profile.persona}"
-                # 处理换行符（CSV中用空格替代）
-                user_char = user_char.replace('\n', ' ').replace('\r', ' ')
-                
-                # description: 简短简介，用于外部显示
-                description = profile.bio.replace('\n', ' ').replace('\r', ' ')
-                
+            for row_dict in self._build_twitter_csv_rows(profiles):
                 row = [
-                    idx,                    # user_id: 从0开始的顺序ID
-                    profile.name,           # name: 真实姓名
-                    profile.user_name,      # username: 用户名
-                    user_char,              # user_char: 完整人设（内部LLM使用）
-                    description             # description: 简短简介（外部显示）
+                    row_dict['user_id'],
+                    row_dict['name'],
+                    row_dict['username'],
+                    row_dict['user_char'],
+                    row_dict['description'],
                 ]
                 writer.writerow(row)
         

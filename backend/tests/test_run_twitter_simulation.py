@@ -1,4 +1,5 @@
 import importlib.util
+import csv
 import json
 import sqlite3
 import sys
@@ -129,3 +130,47 @@ def test_export_new_trace_actions_writes_simulationrunner_compatible_jsonl(tmp_p
     assert lines[0]['agent_name'] == 'captain_mira_1'
     assert lines[0]['action_type'] == 'quote_post'
     assert lines[0]['action_args']['new_post_id'] == 8
+
+
+def test_ipc_handler_update_status_writes_platform_availability_flags(tmp_path):
+    mod = _load_module()
+    handler = mod.IPCHandler(str(tmp_path), env=object(), agent_graph=object())
+
+    handler.update_status('alive')
+
+    payload = json.loads((tmp_path / 'env_status.json').read_text(encoding='utf-8'))
+    assert payload['status'] == 'alive'
+    assert payload['twitter_available'] is True
+    assert payload['reddit_available'] is False
+
+
+def test_normalize_profile_csv_for_oasis_rewrites_legacy_columns(tmp_path):
+    mod = _load_module()
+    runner = object.__new__(mod.TwitterSimulationRunner)
+    runner.simulation_dir = str(tmp_path)
+
+    path = tmp_path / 'twitter_profiles.csv'
+    with open(path, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['user_id', 'username', 'name', 'bio', 'persona'])
+        writer.writeheader()
+        writer.writerow({
+            'user_id': 7,
+            'username': 'captain_mira',
+            'name': 'Captain Mira',
+            'bio': 'Harbor captain monitoring the docks.',
+            'persona': 'Calm, procedural, and trusted in crises.',
+        })
+
+    rewritten = runner._normalize_profile_csv_for_oasis()
+
+    with open(path, 'r', encoding='utf-8', newline='') as f:
+        rows = list(csv.DictReader(f))
+
+    assert rewritten is True
+    assert list(rows[0].keys()) == ['user_id', 'name', 'username', 'user_char', 'description']
+    assert rows[0]['user_id'] == '7'
+    assert rows[0]['name'] == 'Captain Mira'
+    assert rows[0]['username'] == 'captain_mira'
+    assert 'Harbor captain monitoring the docks.' in rows[0]['user_char']
+    assert 'Calm, procedural, and trusted in crises.' in rows[0]['user_char']
+    assert rows[0]['description'] == 'Harbor captain monitoring the docks.'

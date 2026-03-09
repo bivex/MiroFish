@@ -16,6 +16,7 @@ OASIS Twitter模拟预设脚本
 import argparse
 import asyncio
 import copy
+import csv
 import json
 import logging
 import os
@@ -165,6 +166,8 @@ class IPCHandler:
         with open(self.status_file, 'w', encoding='utf-8') as f:
             json.dump({
                 "status": status,
+                "twitter_available": self.env is not None,
+                "reddit_available": False,
                 "timestamp": datetime.now().isoformat()
             }, f, ensure_ascii=False, indent=2)
     
@@ -420,6 +423,49 @@ class TwitterSimulationRunner:
     def _get_profile_path(self) -> str:
         """获取Profile文件路径（OASIS Twitter使用CSV格式）"""
         return os.path.join(self.simulation_dir, "twitter_profiles.csv")
+
+    def _normalize_profile_csv_for_oasis(self) -> bool:
+        """将 legacy Twitter CSV 兼容转换为 OASIS 期望的字段。"""
+        profile_path = self._get_profile_path()
+        if not os.path.exists(profile_path):
+            return False
+
+        with open(profile_path, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            rows = list(reader)
+
+        required_headers = ['user_id', 'name', 'username', 'user_char', 'description']
+        if all(header in fieldnames for header in required_headers):
+            return False
+
+        if 'persona' not in fieldnames and 'bio' not in fieldnames:
+            return False
+
+        normalized_rows = []
+        for idx, row in enumerate(rows):
+            bio = (row.get('bio') or row.get('description') or '').replace('\n', ' ').replace('\r', ' ').strip()
+            persona = (row.get('persona') or row.get('user_char') or '').replace('\n', ' ').replace('\r', ' ').strip()
+
+            user_char = bio or persona
+            if bio and persona and persona != bio:
+                user_char = f"{bio} {persona}".strip()
+
+            normalized_rows.append({
+                'user_id': row.get('user_id') or idx,
+                'name': row.get('name') or row.get('username') or row.get('user_name') or f'Agent {idx}',
+                'username': row.get('username') or row.get('user_name') or row.get('name') or f'agent_{idx}',
+                'user_char': user_char,
+                'description': bio,
+            })
+
+        with open(profile_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=required_headers)
+            writer.writeheader()
+            writer.writerows(normalized_rows)
+
+        print(f"已将 legacy Twitter profiles 规范化为 OASIS 格式: {profile_path}")
+        return True
     
     def _get_db_path(self) -> str:
         """获取数据库路径"""
@@ -753,6 +799,7 @@ class TwitterSimulationRunner:
         if not os.path.exists(profile_path):
             print(f"错误: Profile文件不存在: {profile_path}")
             return
+        self._normalize_profile_csv_for_oasis()
         
         self.agent_graph = await generate_twitter_agent_graph(
             profile_path=profile_path,

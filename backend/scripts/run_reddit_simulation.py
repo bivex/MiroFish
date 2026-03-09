@@ -15,6 +15,7 @@ OASIS Reddit模拟预设脚本
 
 import argparse
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -430,6 +431,55 @@ class RedditSimulationRunner:
     def _get_db_path(self) -> str:
         """获取数据库路径"""
         return os.path.join(self.simulation_dir, "reddit_simulation.db")
+
+    @staticmethod
+    def _sanitize_tool_schema(tool) -> bool:
+        """Patch zero-arg tool schemas that OpenAI-compatible endpoints reject."""
+        try:
+            schema = copy.deepcopy(tool.get_openai_tool_schema())
+        except Exception:
+            return False
+
+        function_schema = schema.get("function") or {}
+        parameters = function_schema.get("parameters") or {}
+        if not isinstance(parameters, dict):
+            return False
+
+        if parameters.get("properties") != {} or parameters.get("required") != []:
+            return False
+
+        sanitized_parameters = dict(parameters)
+        sanitized_parameters.setdefault("properties", {})
+        sanitized_parameters.pop("required", None)
+        sanitized_schema = dict(schema)
+        sanitized_schema["function"] = {
+            **function_schema,
+            "parameters": sanitized_parameters,
+        }
+        tool.get_openai_tool_schema = (
+            lambda _schema=copy.deepcopy(sanitized_schema): copy.deepcopy(_schema)
+        )
+        return True
+
+    def _sanitize_agent_tool_schemas(self) -> int:
+        """Normalize generated tool schemas before any env.step() calls."""
+        if self.agent_graph is None:
+            return 0
+
+        patched = 0
+        seen_tools = set()
+        for _agent_id, agent in self.agent_graph.get_agents():
+            tool_candidates = list(getattr(agent, "action_tools", []) or [])
+            tool_candidates.extend((getattr(agent, "_internal_tools", {}) or {}).values())
+            for tool in tool_candidates:
+                tool_id = id(tool)
+                if tool_id in seen_tools:
+                    continue
+                seen_tools.add(tool_id)
+                if self._sanitize_tool_schema(tool):
+                    patched += 1
+
+        return patched
     
     def _create_model(self):
         """
@@ -567,6 +617,9 @@ class RedditSimulationRunner:
             model=model,
             available_actions=self.AVAILABLE_ACTIONS,
         )
+        patched_tools = self._sanitize_agent_tool_schemas()
+        if patched_tools:
+            print(f"已修正 {patched_tools} 个 zero-arg tool schema（兼容 OpenAI tool calling）")
         
         db_path = self._get_db_path()
         if os.path.exists(db_path):

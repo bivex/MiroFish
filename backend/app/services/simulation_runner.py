@@ -351,6 +351,46 @@ class SimulationRunner:
             logger.warning(f"同步 state.json 失败: {simulation_id}, error={e}")
 
     @classmethod
+    def _load_simulation_state_file(cls, simulation_id: str) -> Dict[str, Any]:
+        """读取 simulation state.json，用于推断启用平台等元数据。"""
+        state_file = os.path.join(cls.RUN_STATE_DIR, simulation_id, "state.json")
+        if not os.path.exists(state_file):
+            return {}
+
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.warning(f"读取 state.json 失败: {simulation_id}, error={e}")
+            return {}
+
+    @classmethod
+    def _resolve_effective_platform(cls, simulation_id: str, requested_platform: str) -> str:
+        """根据 simulation state.json 中的 enable_* 标记推断真实运行平台。"""
+        state_data = cls._load_simulation_state_file(simulation_id)
+        enable_twitter = bool(state_data.get("enable_twitter", True))
+        enable_reddit = bool(state_data.get("enable_reddit", True))
+
+        if not enable_twitter and not enable_reddit:
+            raise ValueError(f"模拟未启用任何平台: {simulation_id}")
+
+        if requested_platform == "twitter" and not enable_twitter:
+            raise ValueError(f"模拟未启用 Twitter 平台: {simulation_id}")
+        if requested_platform == "reddit" and not enable_reddit:
+            raise ValueError(f"模拟未启用 Reddit 平台: {simulation_id}")
+
+        if requested_platform == "parallel":
+            if enable_twitter and not enable_reddit:
+                logger.info(f"检测到 Twitter-only 模拟，自动将平台从 parallel 调整为 twitter: {simulation_id}")
+                return "twitter"
+            if enable_reddit and not enable_twitter:
+                logger.info(f"检测到 Reddit-only 模拟，自动将平台从 parallel 调整为 reddit: {simulation_id}")
+                return "reddit"
+
+        return requested_platform
+
+    @classmethod
     def _cleanup_terminal_orphaned_process(
         cls,
         state: Optional[SimulationRunState],
@@ -702,6 +742,8 @@ class SimulationRunner:
         
         with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
+
+        platform = cls._resolve_effective_platform(simulation_id, platform)
         
         # 初始化运行状态
         time_config = config.get("time_config", {})
@@ -884,13 +926,18 @@ class SimulationRunner:
 
             if exit_code == 0:
                 state.runner_status = RunnerStatus.COMPLETED
+                state.error = None
                 state.completed_at = datetime.now().isoformat()
                 logger.info(f"模拟完成: {simulation_id}")
             elif shutdown_reason == "close_env":
-                if state.runner_status == RunnerStatus.COMPLETED:
+                if state.runner_status == RunnerStatus.COMPLETED or cls._check_all_platforms_completed(state):
+                    state.runner_status = RunnerStatus.COMPLETED
+                    state.error = None
+                    state.completed_at = state.completed_at or datetime.now().isoformat()
                     logger.info(f"close-env 后模拟进程已退出: {simulation_id}")
                 else:
                     state.runner_status = RunnerStatus.STOPPED
+                    state.error = None
                     state.completed_at = datetime.now().isoformat()
                     logger.info(f"close-env 后模拟已停止: {simulation_id}")
             else:
@@ -911,12 +958,22 @@ class SimulationRunner:
             state.reddit_running = False
             state.process_pid = None
             cls._save_run_state(state)
+            cls._sync_simulation_state_file(
+                simulation_id,
+                status=state.runner_status.value,
+                error=state.error,
+            )
             
         except Exception as e:
             logger.error(f"监控线程异常: {simulation_id}, error={str(e)}")
             state.runner_status = RunnerStatus.FAILED
             state.error = str(e)
             cls._save_run_state(state)
+            cls._sync_simulation_state_file(
+                simulation_id,
+                status=state.runner_status.value,
+                error=state.error,
+            )
         
         finally:
             # 停止图谱记忆更新器
@@ -988,22 +1045,24 @@ class SimulationRunner:
                                 
                                 # 检测 simulation_end 事件，标记平台已完成
                                 if event_type == "simulation_end":
+                                    all_completed_before = cls._check_all_platforms_completed(state)
                                     if platform == "twitter":
+                                        already_completed = state.twitter_completed
                                         state.twitter_completed = True
                                         state.twitter_running = False
-                                        logger.info(f"Twitter 模拟已完成: {state.simulation_id}, total_rounds={action_data.get('total_rounds')}, total_actions={action_data.get('total_actions')}")
+                                        if not already_completed:
+                                            logger.info(f"Twitter 模拟已完成: {state.simulation_id}, total_rounds={action_data.get('total_rounds')}, total_actions={action_data.get('total_actions')}")
                                     elif platform == "reddit":
+                                        already_completed = state.reddit_completed
                                         state.reddit_completed = True
                                         state.reddit_running = False
-                                        logger.info(f"Reddit 模拟已完成: {state.simulation_id}, total_rounds={action_data.get('total_rounds')}, total_actions={action_data.get('total_actions')}")
+                                        if not already_completed:
+                                            logger.info(f"Reddit 模拟已完成: {state.simulation_id}, total_rounds={action_data.get('total_rounds')}, total_actions={action_data.get('total_actions')}")
                                     
-                                    # 检查是否所有启用的平台都已完成
-                                    # 如果只运行了一个平台，只检查那个平台
-                                    # 如果运行了两个平台，需要两个都完成
+                                    # 只更新平台完成标记；live 进程仍可能在等待 IPC，
+                                    # 不应在 simulation_end 事件上提前把整个 runner 标记为 completed。
                                     all_completed = cls._check_all_platforms_completed(state)
-                                    if all_completed:
-                                        state.runner_status = RunnerStatus.COMPLETED
-                                        state.completed_at = datetime.now().isoformat()
+                                    if all_completed and not all_completed_before:
                                         logger.info(f"所有平台模拟已完成: {state.simulation_id}")
                                 
                                 # 更新轮次信息（从 round_end 事件）
@@ -1786,10 +1845,11 @@ class SimulationRunner:
         try:
             with open(status_file, 'r', encoding='utf-8') as f:
                 status = json.load(f)
+            state_data = cls._load_simulation_state_file(simulation_id)
             return {
                 "status": status.get("status", "stopped"),
-                "twitter_available": status.get("twitter_available", False),
-                "reddit_available": status.get("reddit_available", False),
+                "twitter_available": status.get("twitter_available", state_data.get("enable_twitter", False)),
+                "reddit_available": status.get("reddit_available", state_data.get("enable_reddit", False)),
                 "timestamp": status.get("timestamp")
             }
         except (json.JSONDecodeError, OSError):

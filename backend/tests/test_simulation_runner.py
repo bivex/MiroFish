@@ -413,3 +413,200 @@ def test_start_simulation_rejects_restart_while_process_still_alive(tmp_path):
         assert "/close-env" in str(exc)
     else:
         raise AssertionError("expected start_simulation to reject overlapping restart")
+
+
+def test_read_action_log_marks_platform_completed_without_finishing_live_runner(tmp_path):
+    module = load_simulation_runner_module()
+    runner = module.SimulationRunner
+    runner.RUN_STATE_DIR = str(tmp_path)
+    runner._run_states.clear()
+    runner._processes.clear()
+
+    sim_dir = tmp_path / "sim_live"
+    twitter_dir = sim_dir / "twitter"
+    twitter_dir.mkdir(parents=True)
+    log_path = twitter_dir / "actions.jsonl"
+    log_path.write_text(json.dumps({
+        "event_type": "simulation_end",
+        "platform": "twitter",
+        "total_rounds": 24,
+        "total_actions": 5,
+    }) + "\n", encoding="utf-8")
+
+    messages = []
+    module.logger = types.SimpleNamespace(
+        info=lambda msg: messages.append(msg),
+        warning=lambda *a, **k: None,
+        error=lambda *a, **k: None,
+        debug=lambda *a, **k: None,
+    )
+
+    state = module.SimulationRunState(
+        simulation_id="sim_live",
+        runner_status=module.RunnerStatus.RUNNING,
+        process_pid=12345,
+        twitter_running=True,
+        reddit_running=False,
+    )
+
+    runner._read_action_log(str(log_path), 0, state, "twitter")
+    runner._read_action_log(str(log_path), 0, state, "twitter")
+
+    assert state.twitter_completed is True
+    assert state.twitter_running is False
+    assert state.runner_status == module.RunnerStatus.RUNNING
+    assert state.completed_at is None
+    assert sum("Twitter 模拟已完成" in msg for msg in messages) == 1
+    assert sum("所有平台模拟已完成" in msg for msg in messages) == 1
+
+
+def test_start_simulation_coerces_parallel_to_single_enabled_platform(tmp_path):
+    module = load_simulation_runner_module()
+    runner = module.SimulationRunner
+    runner.RUN_STATE_DIR = str(tmp_path)
+    runner.SCRIPTS_DIR = str(tmp_path / "scripts")
+    runner._run_states.clear()
+    runner._processes.clear()
+    runner._action_queues.clear()
+    runner._monitor_threads.clear()
+    runner._stdout_files.clear()
+    runner._stderr_files.clear()
+
+    sim_dir = tmp_path / "sim_twitter_only"
+    sim_dir.mkdir()
+    scripts_dir = Path(runner.SCRIPTS_DIR)
+    scripts_dir.mkdir()
+    (scripts_dir / "run_twitter_simulation.py").write_text("# twitter\n", encoding="utf-8")
+    (scripts_dir / "run_reddit_simulation.py").write_text("# reddit\n", encoding="utf-8")
+    (scripts_dir / "run_parallel_simulation.py").write_text("# parallel\n", encoding="utf-8")
+
+    (sim_dir / "state.json").write_text(json.dumps({
+        "simulation_id": "sim_twitter_only",
+        "enable_twitter": True,
+        "enable_reddit": False,
+        "status": "ready",
+    }), encoding="utf-8")
+    (sim_dir / "simulation_config.json").write_text(json.dumps({
+        "time_config": {
+            "total_simulation_hours": 24,
+            "minutes_per_round": 60,
+        }
+    }), encoding="utf-8")
+
+    launched = {}
+
+    class FakeProcess:
+        def __init__(self, cmd, **kwargs):
+            launched["cmd"] = cmd
+            launched["cwd"] = kwargs.get("cwd")
+            self.pid = 737373
+
+        def poll(self):
+            return None
+
+    class FakeThread:
+        def __init__(self, target=None, args=None, daemon=None):
+            self.target = target
+            self.args = args or ()
+
+        def start(self):
+            launched["monitor_started"] = True
+
+    module.subprocess.Popen = FakeProcess
+    module.threading.Thread = FakeThread
+
+    state = runner.start_simulation("sim_twitter_only", platform="parallel")
+
+    assert Path(launched["cmd"][1]).name == "run_twitter_simulation.py"
+    assert state.twitter_running is True
+    assert state.reddit_running is False
+
+
+def test_get_env_status_detail_falls_back_to_enabled_platform_flags(tmp_path):
+    module = load_simulation_runner_module()
+    runner = module.SimulationRunner
+    runner.RUN_STATE_DIR = str(tmp_path)
+
+    sim_dir = tmp_path / 'sim_env'
+    sim_dir.mkdir()
+    (sim_dir / 'state.json').write_text(json.dumps({
+        'simulation_id': 'sim_env',
+        'enable_twitter': True,
+        'enable_reddit': False,
+    }), encoding='utf-8')
+    (sim_dir / 'env_status.json').write_text(json.dumps({
+        'status': 'alive',
+        'timestamp': '2026-03-09T00:00:00',
+    }), encoding='utf-8')
+
+    status = runner.get_env_status_detail('sim_env')
+
+    assert status['status'] == 'alive'
+    assert status['twitter_available'] is True
+    assert status['reddit_available'] is False
+
+
+def test_monitor_simulation_marks_close_env_as_completed_when_loop_already_finished(tmp_path):
+    module = load_simulation_runner_module()
+    runner = module.SimulationRunner
+    runner.RUN_STATE_DIR = str(tmp_path)
+    runner._run_states.clear()
+    runner._processes.clear()
+    runner._action_queues.clear()
+    runner._monitor_threads.clear()
+    runner._stdout_files.clear()
+    runner._stderr_files.clear()
+    runner._expected_process_exits.clear()
+
+    sim_dir = tmp_path / 'sim_close_completed'
+    twitter_dir = sim_dir / 'twitter'
+    twitter_dir.mkdir(parents=True)
+    (sim_dir / 'state.json').write_text(json.dumps({
+        'simulation_id': 'sim_close_completed',
+        'status': 'running',
+        'enable_twitter': True,
+        'enable_reddit': False,
+    }), encoding='utf-8')
+    (twitter_dir / 'actions.jsonl').write_text(json.dumps({
+        'event_type': 'simulation_end',
+        'platform': 'twitter',
+        'total_rounds': 3,
+        'total_actions': 0,
+    }) + '\n', encoding='utf-8')
+
+    state = module.SimulationRunState(
+        simulation_id='sim_close_completed',
+        runner_status=module.RunnerStatus.RUNNING,
+        process_pid=424242,
+        twitter_running=True,
+        reddit_running=False,
+    )
+    runner._run_states['sim_close_completed'] = state
+    runner._expected_process_exits['sim_close_completed'] = 'close_env'
+
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = None
+            self._poll_count = 0
+
+        def poll(self):
+            self._poll_count += 1
+            if self._poll_count == 1:
+                return None
+            self.returncode = -15
+            return self.returncode
+
+    runner._processes['sim_close_completed'] = FakeProcess()
+    module.time.sleep = lambda *_args, **_kwargs: None
+
+    runner._monitor_simulation('sim_close_completed')
+
+    assert state.runner_status == module.RunnerStatus.COMPLETED
+    assert state.twitter_completed is True
+    assert state.process_pid is None
+
+    synced_state = json.loads((sim_dir / 'state.json').read_text(encoding='utf-8'))
+    synced_run_state = json.loads((sim_dir / 'run_state.json').read_text(encoding='utf-8'))
+
+    assert synced_state['status'] == 'completed'
+    assert synced_run_state['runner_status'] == 'completed'
