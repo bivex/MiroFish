@@ -284,7 +284,22 @@ def get_generate_status():
         task_id = data.get('task_id')
         simulation_id = data.get('simulation_id')
         
-        # 如果提供了simulation_id，先检查是否已有完成的报告
+        if task_id:
+            task_manager = TaskManager()
+            task = task_manager.get_task(task_id)
+
+            if not task:
+                return jsonify({
+                    "success": False,
+                    "error": f"Task not found: {task_id}"
+                }), 404
+
+            return jsonify({
+                "success": True,
+                "data": task.to_dict()
+            })
+
+        # 如果没有提供task_id，再按simulation_id检查是否已有完成的报告
         if simulation_id:
             existing_report = ReportManager.get_report_by_simulation(simulation_id)
             if existing_report and existing_report.status == ReportStatus.COMPLETED:
@@ -299,26 +314,17 @@ def get_generate_status():
                         "already_completed": True
                     }
                 })
-        
-        if not task_id:
+
+        if not simulation_id:
             return jsonify({
                 "success": False,
                 "error": "Please provide task_id or simulation_id"
             }), 400
-        
-        task_manager = TaskManager()
-        task = task_manager.get_task(task_id)
-        
-        if not task:
-            return jsonify({
-                "success": False,
-                "error": f"Task not found: {task_id}"
-            }), 404
-        
+
         return jsonify({
-            "success": True,
-            "data": task.to_dict()
-        })
+            "success": False,
+            "error": "Please provide task_id or simulation_id"
+        }), 400
         
     except Exception as e:
         logger.error(f"查询任务状态失败: {str(e)}")

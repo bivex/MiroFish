@@ -123,3 +123,57 @@ def test_report_api_preflight_accepts_runtime_evidence():
     assert runtime["total_actions"] == 2
     assert runtime["runner_status"] == "running"
     assert error is None
+
+
+def test_generate_status_prefers_task_id_over_completed_simulation_report():
+    module = load_report_api_module()
+    module.request.get_json = lambda: {
+        "task_id": "task_new",
+        "simulation_id": "sim_1",
+    }
+    module.ReportManager = types.SimpleNamespace(
+        get_report_by_simulation=lambda simulation_id: types.SimpleNamespace(
+            report_id="report_old",
+            status=module.ReportStatus.COMPLETED,
+        )
+    )
+
+    class TaskStub:
+        def to_dict(self):
+            return {
+                "task_id": "task_new",
+                "status": "processing",
+                "metadata": {"report_id": "report_new"},
+            }
+
+    class TaskManagerStub:
+        def get_task(self, task_id):
+            assert task_id == "task_new"
+            return TaskStub()
+
+    module.TaskManager = TaskManagerStub
+
+    response = module.get_generate_status()
+
+    assert response["success"] is True
+    assert response["data"]["task_id"] == "task_new"
+    assert response["data"]["status"] == "processing"
+    assert response["data"]["metadata"]["report_id"] == "report_new"
+
+
+def test_generate_status_uses_completed_report_when_only_simulation_id_is_provided():
+    module = load_report_api_module()
+    module.request.get_json = lambda: {"simulation_id": "sim_1"}
+    module.ReportManager = types.SimpleNamespace(
+        get_report_by_simulation=lambda simulation_id: types.SimpleNamespace(
+            report_id="report_old",
+            status=module.ReportStatus.COMPLETED,
+        )
+    )
+
+    response = module.get_generate_status()
+
+    assert response["success"] is True
+    assert response["data"]["simulation_id"] == "sim_1"
+    assert response["data"]["report_id"] == "report_old"
+    assert response["data"]["already_completed"] is True
