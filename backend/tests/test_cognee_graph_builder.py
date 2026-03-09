@@ -56,7 +56,7 @@ def test_cognee_builder_wait_for_episodes_is_compatible_noop():
 
     builder._wait_for_episodes(["graph_1"], lambda msg, progress: progress_updates.append((msg, progress)))
 
-    assert progress_updates == [("Cognee 数据已同步，无需额外等待", 1.0)]
+    assert progress_updates == [("Cognee data is already synced; no extra wait required", 1.0)]
 
 
 def test_cognee_builder_applies_projection_semantic_types(tmp_path):

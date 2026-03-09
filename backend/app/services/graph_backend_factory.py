@@ -13,7 +13,7 @@ SUPPORTED_GRAPH_BACKENDS = {"zep", "cognee"}
 def resolve_graph_backend(graph_backend: str | None = None) -> str:
     backend = (graph_backend or Config.get_graph_backend() or "zep").strip().lower()
     if backend not in SUPPORTED_GRAPH_BACKENDS:
-        raise ValueError(f"不支持的 GRAPH_BACKEND: {backend}")
+        raise ValueError(f"Unsupported GRAPH_BACKEND: {backend}")
     return backend
 
 
@@ -21,7 +21,7 @@ def validate_graph_backend_requirements(graph_backend: str | None = None) -> lis
     backend = resolve_graph_backend(graph_backend)
     errors: list[str] = []
     if backend == "zep" and not Config.ZEP_API_KEY:
-        errors.append("ZEP_API_KEY 未配置")
+        errors.append("ZEP_API_KEY is not configured")
     return errors
 
 
@@ -77,4 +77,4 @@ def get_graph_memory_manager_class(graph_backend: str | None = None) -> type[Any
 
         return ZepGraphMemoryManager
 
-    raise NotImplementedError("Cognee graph memory updater 尚未接入")
+    raise NotImplementedError("Cognee graph memory updater is not integrated yet")

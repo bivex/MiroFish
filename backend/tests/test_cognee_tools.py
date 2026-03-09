@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import types
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -23,6 +24,23 @@ def load_cognee_tools_module():
     sidecar_client_module = types.ModuleType("app.services.cognee_sidecar_client")
     sidecar_client_module.CogneeSidecarClient = object
     sys.modules["app.services.cognee_sidecar_client"] = sidecar_client_module
+
+    simulation_runner_module = types.ModuleType("app.services.simulation_runner")
+
+    class SimulationRunner:
+        run_state = None
+        actions = []
+
+        @classmethod
+        def get_run_state(cls, simulation_id):
+            return cls.run_state
+
+        @classmethod
+        def get_all_actions(cls, simulation_id):
+            return list(cls.actions)
+
+    simulation_runner_module.SimulationRunner = SimulationRunner
+    sys.modules["app.services.simulation_runner"] = simulation_runner_module
 
     module_path = ROOT / "app" / "services" / "cognee_tools.py"
     spec = importlib.util.spec_from_file_location("app.services.cognee_tools", module_path)
@@ -50,8 +68,33 @@ class SidecarStub:
         raise RuntimeError("search unavailable")
 
 
+@dataclass
+class RunStateStub:
+    runner_status: object = "running"
+    current_round: int = 2
+    twitter_actions_count: int = 1
+    reddit_actions_count: int = 1
+    recent_actions: list = None
+
+
+class ActionStub:
+    def __init__(self, *, round_num, platform, agent_name, action_type, result, agent_id=1):
+        self.round_num = round_num
+        self.platform = platform
+        self.agent_name = agent_name
+        self.action_type = action_type
+        self.result = result
+        self.agent_id = agent_id
+        self.timestamp = "2026-03-09T00:00:00"
+        self.action_args = {}
+        self.success = True
+
+
 def test_cognee_tools_search_graph_falls_back_to_local_matches():
     module = load_cognee_tools_module()
+    runner = sys.modules["app.services.simulation_runner"].SimulationRunner
+    runner.run_state = None
+    runner.actions = []
     service = module.CogneeToolsService(sidecar_client=SidecarStub(), entity_reader=object())
 
     result = service.search_graph("graph_1", "Harbor Guild", limit=5)
@@ -63,6 +106,9 @@ def test_cognee_tools_search_graph_falls_back_to_local_matches():
 
 def test_cognee_tools_get_simulation_context_matches_zep_shape():
     module = load_cognee_tools_module()
+    runner = sys.modules["app.services.simulation_runner"].SimulationRunner
+    runner.run_state = None
+    runner.actions = []
     service = module.CogneeToolsService(sidecar_client=SidecarStub(), entity_reader=object())
 
     result = service.get_simulation_context("graph_1", "Run a harbor crisis simulation", limit=10)
@@ -71,3 +117,30 @@ def test_cognee_tools_get_simulation_context_matches_zep_shape():
     assert result["graph_statistics"]["entity_types"]["Organization"] == 1
     assert result["total_entities"] == 2
     assert result["entities"][0]["type"] in {"Organization", "Actor"}
+
+
+def test_cognee_tools_runtime_evidence_is_exposed_in_context_and_search():
+    module = load_cognee_tools_module()
+    runner = sys.modules["app.services.simulation_runner"].SimulationRunner
+    runner.run_state = RunStateStub(recent_actions=[])
+    runner.actions = [
+        ActionStub(
+            round_num=2,
+            platform="twitter",
+            agent_name="Aria",
+            action_type="post_message",
+            result={"content": "Harbor Guild boycott is spreading across the docks."},
+        )
+    ]
+    service = module.CogneeToolsService(sidecar_client=SidecarStub(), entity_reader=object())
+
+    evidence = service.get_runtime_evidence("sim_1", limit=5)
+    result = service.get_simulation_context("graph_1", "boycott in the harbor", limit=10, simulation_id="sim_1")
+    search = service.quick_search("graph_1", "boycott harbor", limit=5, simulation_id="sim_1")
+
+    assert evidence["has_runtime_evidence"] is True
+    assert evidence["total_actions"] == 2
+    assert evidence["action_facts"][0].startswith("[round 2] [twitter] Aria post_message")
+    assert result["runtime_evidence"]["has_runtime_evidence"] is True
+    assert result["related_facts"][0] == evidence["action_facts"][0]
+    assert search.facts[0] == evidence["action_facts"][0]

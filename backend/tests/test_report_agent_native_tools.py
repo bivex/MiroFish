@@ -80,8 +80,39 @@ def test_report_agent_builds_native_tool_specs_for_groq_compatible_llm():
 
     specs = agent._get_native_llm_tools()
     quick_search = next(item for item in specs if item["function"]["name"] == "quick_search")
+    tool_names = {item["function"]["name"] for item in specs}
 
     assert agent._should_use_native_tools() is True
-    assert len(specs) == 4
+    assert len(specs) == 3
+    assert tool_names == {"insight_forge", "panorama_search", "quick_search"}
+    assert "interview_agents" not in agent.tools
     assert quick_search["function"]["parameters"]["properties"]["limit"]["type"] == "integer"
     assert quick_search["function"]["parameters"]["required"] == ["query"]
+
+
+def test_report_agent_requires_runtime_evidence_for_cognee_reports():
+    module = load_report_agent_module()
+
+    class RuntimeEvidenceStub:
+        def get_runtime_evidence(self, simulation_id, limit=10):
+            return {
+                "simulation_id": simulation_id,
+                "has_runtime_evidence": False,
+                "message": "runtime evidence missing",
+            }
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="s1",
+        simulation_requirement="Run a harbor crisis simulation",
+        llm_client=object(),
+        zep_tools=RuntimeEvidenceStub(),
+        graph_backend="cognee",
+    )
+
+    try:
+        agent._ensure_generation_readiness()
+    except ValueError as exc:
+        assert "runtime evidence missing" in str(exc)
+    else:
+        raise AssertionError("Expected _ensure_generation_readiness to reject empty Cognee evidence")

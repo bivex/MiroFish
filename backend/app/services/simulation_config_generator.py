@@ -12,6 +12,7 @@
 
 import json
 import math
+import re
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -296,13 +297,13 @@ class SimulationConfigGenerator:
         num_entities = len(entities)
         time_config_result = self._generate_time_config(context, num_entities)
         time_config = self._parse_time_config(time_config_result, num_entities)
-        reasoning_parts.append(f"时间配置: {time_config_result.get('reasoning', '成功')}")
+        reasoning_parts.append(f"Time configuration: {time_config_result.get('reasoning', 'success')}")
         
         # ========== 步骤2: 生成事件配置 ==========
         report_progress(2, "生成事件配置和热点话题...")
         event_config_result = self._generate_event_config(context, simulation_requirement, entities)
         event_config = self._parse_event_config(event_config_result)
-        reasoning_parts.append(f"事件配置: {event_config_result.get('reasoning', '成功')}")
+        reasoning_parts.append(f"Event configuration: {event_config_result.get('reasoning', 'success')}")
         
         # ========== 步骤3-N: 分批生成Agent配置 ==========
         all_agent_configs = []
@@ -324,13 +325,13 @@ class SimulationConfigGenerator:
             )
             all_agent_configs.extend(batch_configs)
         
-        reasoning_parts.append(f"Agent配置: 成功生成 {len(all_agent_configs)} 个")
+        reasoning_parts.append(f"Agent configuration: generated {len(all_agent_configs)} entries successfully")
         
         # ========== 为初始帖子分配发布者 Agent ==========
         logger.info("为初始帖子分配合适的发布者 Agent...")
         event_config = self._assign_initial_post_agents(event_config, all_agent_configs)
         assigned_count = len([p for p in event_config.initial_posts if p.get("poster_agent_id") is not None])
-        reasoning_parts.append(f"初始帖子分配: {assigned_count} 个帖子已分配发布者")
+        reasoning_parts.append(f"Initial post assignment: {assigned_count} posts assigned to poster agents")
         
         # ========== 最后一步: 生成平台配置 ==========
         report_progress(total_steps, "生成平台配置...")
@@ -390,8 +391,8 @@ class SimulationConfigGenerator:
         
         # 构建上下文
         context_parts = [
-            f"## 模拟需求\n{simulation_requirement}",
-            f"\n## 实体信息 ({len(entities)}个)\n{entity_summary}",
+            f"## Simulation Requirement\n{simulation_requirement}",
+            f"\n## Entity Information ({len(entities)} entities)\n{entity_summary}",
         ]
         
         current_length = sum(len(p) for p in context_parts)
@@ -400,8 +401,8 @@ class SimulationConfigGenerator:
         if remaining_length > 0 and document_text:
             doc_text = document_text[:remaining_length]
             if len(document_text) > remaining_length:
-                doc_text += "\n...(文档已截断)"
-            context_parts.append(f"\n## 原始文档内容\n{doc_text}")
+                doc_text += "\n...(document truncated)"
+            context_parts.append(f"\n## Source Document Content\n{doc_text}")
         
         return "\n".join(context_parts)
     
@@ -418,7 +419,7 @@ class SimulationConfigGenerator:
             by_type[t].append(e)
         
         for entity_type, type_entities in by_type.items():
-            lines.append(f"\n### {entity_type} ({len(type_entities)}个)")
+            lines.append(f"\n### {entity_type} ({len(type_entities)} entities)")
             # 使用配置的显示数量和摘要长度
             display_count = self.ENTITIES_PER_TYPE_DISPLAY
             summary_len = self.ENTITY_SUMMARY_LENGTH
@@ -426,7 +427,7 @@ class SimulationConfigGenerator:
                 summary_preview = (e.summary[:summary_len] + "...") if len(e.summary) > summary_len else e.summary
                 lines.append(f"- {e.name}: {summary_preview}")
             if len(type_entities) > display_count:
-                lines.append(f"  ... 还有 {len(type_entities) - display_count} 个")
+                lines.append(f"  ... {len(type_entities) - display_count} more")
         
         return "\n".join(lines)
     
@@ -539,24 +540,24 @@ class SimulationConfigGenerator:
         # 计算最大允许值（80%的agent数）
         max_agents_allowed = max(1, int(num_entities * 0.9))
         
-        prompt = f"""基于以下模拟需求，生成时间模拟配置。
+        prompt = f"""Generate the time simulation configuration based on the scenario below.
 
 {context_truncated}
 
-## 任务
-请生成时间配置JSON。
+## Task
+Generate the time configuration as JSON.
 
-### 基本原则（仅供参考，需根据世界观、事件性质和参与群体灵活调整）：
-- 优先遵循给定世界观、角色身份、制度和生活节律
-- 如果没有明确世界规则，可使用通用昼夜活跃模式作为默认值
-- 默认模式：凌晨0-5点低活跃，早上6-8点逐渐活跃，白天9-18点中等活跃，晚间19-22点高峰，23点后回落
-- **重要**：以下示例值仅供参考，你需要根据事件性质、参与群体特点来调整具体时段
-  - 例如：学生/学徒群体高峰可能是21-23点；媒体/传令渠道接近全天活跃；官方机构主要在办公时段发声
-  - 例如：夜行种族、战时状态、宗教仪式、节庆或突发危机都可能打破通用昼夜规律
+### Guiding principles (reference only; adapt them to the world, event type, and participating groups)
+- Follow the worldbuilding, role identities, institutions, and daily rhythms whenever they are explicitly defined
+- If the world rules are unclear, you may fall back to a generic day-night activity pattern
+- Default pattern: low activity from 00:00-05:00, increasing activity from 06:00-08:00, moderate daytime activity from 09:00-18:00, peak activity from 19:00-22:00, then decline after 23:00
+- Important: the example values below are only reference values. Adjust them based on the event and the participating groups.
+  - Example: students or apprentices may peak around 21:00-23:00; media or messenger channels may stay active nearly all day; official institutions may speak mostly during office hours.
+  - Example: nocturnal species, wartime conditions, religious rituals, festivals, or sudden crises may break the generic day-night rhythm.
 
-### 返回JSON格式（不要markdown）
+### Return JSON only (no markdown)
 
-示例：
+Example:
 {{
     "total_simulation_hours": 72,
     "minutes_per_round": 60,
@@ -566,21 +567,21 @@ class SimulationConfigGenerator:
     "off_peak_hours": [0, 1, 2, 3, 4, 5],
     "morning_hours": [6, 7, 8],
     "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-    "reasoning": "针对该事件的时间配置说明"
+    "reasoning": "Why this time configuration fits the scenario"
 }}
 
-字段说明：
-- total_simulation_hours (int): 模拟总时长，24-168小时，突发事件短、持续话题长
-- minutes_per_round (int): 每轮时长，30-120分钟，建议60分钟
-- agents_per_hour_min (int): 每小时最少激活Agent数（取值范围: 1-{max_agents_allowed}）
-- agents_per_hour_max (int): 每小时最多激活Agent数（取值范围: 1-{max_agents_allowed}）
-- peak_hours (int数组): 高峰时段，根据事件参与群体调整
-- off_peak_hours (int数组): 低谷时段，通常深夜凌晨
-- morning_hours (int数组): 早间时段
-- work_hours (int数组): 工作时段
-- reasoning (string): 简要说明为什么这样配置"""
+Field guide:
+- total_simulation_hours (int): total duration of the simulation, usually 24-168 hours
+- minutes_per_round (int): duration of each round, usually 30-120 minutes, with 60 as a common default
+- agents_per_hour_min (int): minimum active agents per hour (range: 1-{max_agents_allowed})
+- agents_per_hour_max (int): maximum active agents per hour (range: 1-{max_agents_allowed})
+- peak_hours (int array): peak activity hours adjusted to the participating groups
+- off_peak_hours (int array): low activity hours, usually late night and early morning
+- morning_hours (int array): morning period
+- work_hours (int array): work or institutional hours
+- reasoning (string): brief explanation of why this configuration fits"""
 
-        system_prompt = "你是情景推演中的行为节律规划专家。返回纯JSON格式，优先遵循给定世界观和角色作息；若信息不足，再使用通用昼夜节律。"
+        system_prompt = "You are an expert in scenario simulation rhythm planning. Return pure JSON. Follow the worldbuilding and role rhythms first; only fall back to a generic day-night pattern when the scenario is underspecified."
         
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
@@ -599,14 +600,104 @@ class SimulationConfigGenerator:
             "off_peak_hours": [0, 1, 2, 3, 4, 5],
             "morning_hours": [6, 7, 8],
             "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-            "reasoning": "使用默认昼夜节律配置（每轮1小时）"
+            "reasoning": "Used the default day-night rhythm configuration (1 hour per round)."
         }
+
+    def _coerce_int(self, value: Any, default: int) -> int:
+        """Best-effort integer coercion for LLM-produced config values."""
+        if isinstance(value, bool):
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _split_compact_hour_string(self, raw: str) -> List[int]:
+        """Split compact hour strings like '012345' or '10111213' into hours."""
+        digits = re.sub(r'[^0-9]', '', raw or '')
+        if not digits:
+            return []
+
+        candidates: List[List[int]] = []
+
+        def backtrack(index: int, parts: List[int]):
+            if index == len(digits):
+                candidates.append(parts.copy())
+                return
+
+            for width in (1, 2):
+                if index + width > len(digits):
+                    continue
+                token = digits[index:index + width]
+                if width == 2 and token.startswith('0'):
+                    continue
+                value = int(token)
+                if 0 <= value <= 23:
+                    parts.append(value)
+                    backtrack(index + width, parts)
+                    parts.pop()
+
+        backtrack(0, [])
+        if not candidates:
+            return []
+
+        def score(sequence: List[int]) -> tuple[int, int]:
+            discontinuities = sum(
+                1 for i in range(1, len(sequence))
+                if sequence[i] - sequence[i - 1] != 1
+            )
+            return discontinuities, len(sequence)
+
+        return min(candidates, key=score)
+
+    def _normalize_hour_list(self, value: Any, default: List[int]) -> List[int]:
+        """Normalize hour arrays produced by the LLM into integer 0-23 lists."""
+        normalized: List[int] = []
+
+        def append_hours(raw: Any):
+            if isinstance(raw, bool) or raw is None:
+                return
+            if isinstance(raw, list):
+                for item in raw:
+                    append_hours(item)
+                return
+            if isinstance(raw, int):
+                parsed = [raw] if 0 <= raw <= 23 else self._split_compact_hour_string(str(raw))
+            elif isinstance(raw, float) and raw.is_integer():
+                whole = int(raw)
+                parsed = [whole] if 0 <= whole <= 23 else self._split_compact_hour_string(str(whole))
+            elif isinstance(raw, str):
+                text = raw.strip()
+                if not text:
+                    return
+                tokens = re.findall(r'\d+', text)
+                parsed = []
+                if len(tokens) > 1:
+                    for token in tokens:
+                        parsed.extend(self._split_compact_hour_string(token))
+                else:
+                    parsed = self._split_compact_hour_string(text)
+            else:
+                return
+
+            for hour in parsed:
+                if 0 <= hour <= 23 and hour not in normalized:
+                    normalized.append(hour)
+
+        append_hours(value)
+        return normalized or list(default)
     
     def _parse_time_config(self, result: Dict[str, Any], num_entities: int) -> TimeSimulationConfig:
         """解析时间配置结果，并验证agents_per_hour值不超过总agent数"""
         # 获取原始值
-        agents_per_hour_min = result.get("agents_per_hour_min", max(1, num_entities // 15))
-        agents_per_hour_max = result.get("agents_per_hour_max", max(5, num_entities // 5))
+        agents_per_hour_min = self._coerce_int(
+            result.get("agents_per_hour_min", max(1, num_entities // 15)),
+            max(1, num_entities // 15)
+        )
+        agents_per_hour_max = self._coerce_int(
+            result.get("agents_per_hour_max", max(5, num_entities // 5)),
+            max(5, num_entities // 5)
+        )
         
         # 验证并修正：确保不超过总agent数
         if agents_per_hour_min > num_entities:
@@ -623,16 +714,16 @@ class SimulationConfigGenerator:
             logger.warning(f"agents_per_hour_min >= max，已修正为 {agents_per_hour_min}")
         
         return TimeSimulationConfig(
-            total_simulation_hours=result.get("total_simulation_hours", 72),
-            minutes_per_round=result.get("minutes_per_round", 60),  # 默认每轮1小时
+            total_simulation_hours=self._coerce_int(result.get("total_simulation_hours", 72), 72),
+            minutes_per_round=self._coerce_int(result.get("minutes_per_round", 60), 60),  # 默认每轮1小时
             agents_per_hour_min=agents_per_hour_min,
             agents_per_hour_max=agents_per_hour_max,
-            peak_hours=result.get("peak_hours", [19, 20, 21, 22]),
-            off_peak_hours=result.get("off_peak_hours", [0, 1, 2, 3, 4, 5]),
+            peak_hours=self._normalize_hour_list(result.get("peak_hours"), [19, 20, 21, 22]),
+            off_peak_hours=self._normalize_hour_list(result.get("off_peak_hours"), [0, 1, 2, 3, 4, 5]),
             off_peak_activity_multiplier=0.05,  # 凌晨几乎无人
-            morning_hours=result.get("morning_hours", [6, 7, 8]),
+            morning_hours=self._normalize_hour_list(result.get("morning_hours"), [6, 7, 8]),
             morning_activity_multiplier=0.4,
-            work_hours=result.get("work_hours", list(range(9, 19))),
+            work_hours=self._normalize_hour_list(result.get("work_hours"), list(range(9, 19))),
             work_activity_multiplier=0.7,
             peak_activity_multiplier=1.5
         )
@@ -667,36 +758,36 @@ class SimulationConfigGenerator:
         # 使用配置的上下文截断长度
         context_truncated = context[:self.EVENT_CONFIG_CONTEXT_LENGTH]
         
-        prompt = f"""基于以下模拟需求，生成事件配置。
+        prompt = f"""Generate the event configuration for the following scenario.
 
-模拟需求: {simulation_requirement}
+Simulation requirement: {simulation_requirement}
 
 {context_truncated}
 
-## 可用实体类型及示例
+## Available entity types and examples
 {type_info}
 
-## 任务
-请生成事件配置JSON：
-- 提取核心议题或热点关键词
-- 描述情景发展方向或公共叙事走向
-- 设计初始消息、声明或帖子内容，**每条都必须指定 poster_type（发布者类型）**
+## Task
+Generate the event configuration as JSON:
+- extract the core topics or hot keywords
+- describe the likely narrative direction or public storyline
+- design initial messages, statements, or posts, and **every post must include a poster_type**
 
-**重要**: poster_type 必须从上面的"可用实体类型"中选择，这样初始帖子才能分配给合适的 Agent 发布。
-例如：官方声明应由 Official/University/GovernmentAgency 类型发布，新闻或公告由 MediaOutlet 或相近类型发布，个人观点由 Student/Person/Leader 等相近类型发布。
+Important: poster_type must be selected from the "available entity types" list above so that each initial post can be assigned to an appropriate agent.
+For example: official statements should come from Official, University, or GovernmentAgency types; news or announcements should come from MediaOutlet or a similar type; personal viewpoints should come from Student, Person, Leader, or a similar type.
 
-返回JSON格式（不要markdown）：
+Return JSON only (no markdown):
 {{
-    "hot_topics": ["关键词1", "关键词2", ...],
-    "narrative_direction": "<情景发展方向或公共叙事描述>",
+    "hot_topics": ["topic 1", "topic 2", ...],
+    "narrative_direction": "<description of the scenario direction or public narrative>",
     "initial_posts": [
-        {{"content": "帖子内容", "poster_type": "实体类型（必须从可用类型中选择）"}},
+        {{"content": "post content", "poster_type": "entity type (must be chosen from the available types)"}},
         ...
     ],
-    "reasoning": "<简要说明>"
+    "reasoning": "<brief explanation>"
 }}"""
 
-        system_prompt = "你是情景事件设计专家。返回纯JSON格式。注意 poster_type 必须精确匹配可用实体类型，并与其身份定位一致。"
+        system_prompt = "You are an expert in scenario event design. Return pure JSON. poster_type must exactly match one of the available entity types and fit that role's identity." 
         
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
@@ -706,17 +797,58 @@ class SimulationConfigGenerator:
                 "hot_topics": [],
                 "narrative_direction": "",
                 "initial_posts": [],
-                "reasoning": "使用默认配置"
+                "reasoning": "Used the default event configuration."
             }
     
     def _parse_event_config(self, result: Dict[str, Any]) -> EventConfig:
         """解析事件配置结果"""
         return EventConfig(
-            initial_posts=result.get("initial_posts", []),
+            initial_posts=self._normalize_initial_posts(result.get("initial_posts", [])),
             scheduled_events=[],
             hot_topics=result.get("hot_topics", []),
             narrative_direction=result.get("narrative_direction", "")
         )
+
+    def _normalize_initial_posts(self, value: Any) -> List[Dict[str, Any]]:
+        """Normalize LLM-produced initial_posts into a list of post dicts."""
+        if value is None:
+            return []
+
+        raw_posts = value if isinstance(value, list) else [value]
+        normalized_posts: List[Dict[str, Any]] = []
+
+        for post in raw_posts:
+            if isinstance(post, str):
+                content = post.strip()
+                if content:
+                    normalized_posts.append({
+                        "content": content,
+                        "poster_type": "Unknown",
+                    })
+                continue
+
+            if not isinstance(post, dict):
+                continue
+
+            content = (
+                post.get("content")
+                or post.get("message")
+                or post.get("text")
+                or post.get("body")
+                or ""
+            )
+            content = str(content).strip()
+            if not content:
+                continue
+
+            poster_type = post.get("poster_type") or post.get("author_type") or "Unknown"
+            normalized_posts.append({
+                **post,
+                "content": content,
+                "poster_type": str(poster_type).strip() or "Unknown",
+            })
+
+        return normalized_posts
     
     def _assign_initial_post_agents(
         self,
@@ -730,64 +862,159 @@ class SimulationConfigGenerator:
         """
         if not event_config.initial_posts:
             return event_config
+
+        def normalize_label(value: str) -> str:
+            return re.sub(r'[^a-z0-9]+', '', (value or '').strip().lower())
+
+        def tokenize_label(value: str) -> List[str]:
+            return re.findall(r'[a-z0-9]+', (value or '').strip().lower())
+
+        def build_name_variants(value: str) -> set[str]:
+            tokens = tokenize_label(value)
+            if not tokens:
+                return set()
+
+            variants = {
+                normalize_label(value),
+                normalize_label(' '.join(tokens)),
+            }
+
+            meaningful_tokens = [token for token in tokens if token not in {'the', 'a', 'an'}]
+            if meaningful_tokens:
+                variants.add(normalize_label(' '.join(meaningful_tokens)))
+
+            if 'the' in tokens:
+                split_idx = tokens.index('the')
+                before_the = [token for token in tokens[:split_idx] if token not in {'the', 'a', 'an'}]
+                after_the = [token for token in tokens[split_idx + 1:] if token not in {'the', 'a', 'an'}]
+                if before_the and after_the:
+                    variants.add(normalize_label(' '.join(after_the + before_the)))
+                    variants.add(normalize_label(' '.join(before_the + after_the)))
+
+            if len(meaningful_tokens) == 2:
+                variants.add(normalize_label(' '.join(reversed(meaningful_tokens))))
+
+            return {variant for variant in variants if variant}
+
+        non_poster_types = {
+            'documentchunk',
+            'textdocument',
+            'entitytype',
+            'textsummary',
+            'schema',
+        }
+
+        poster_eligible_agents = [
+            agent for agent in agent_configs
+            if normalize_label(agent.entity_type) not in non_poster_types
+        ] or agent_configs
+
+        def choose_agent(candidates: List[AgentActivityConfig], bucket_key: str) -> Optional[AgentActivityConfig]:
+            if not candidates:
+                return None
+            idx = used_indices.get(bucket_key, 0) % len(candidates)
+            used_indices[bucket_key] = idx + 1
+            return candidates[idx]
         
         # 按实体类型建立 agent 索引
         agents_by_type: Dict[str, List[AgentActivityConfig]] = {}
-        for agent in agent_configs:
-            etype = agent.entity_type.lower()
+        agents_by_name: Dict[str, List[AgentActivityConfig]] = {}
+        agent_name_tokens: List[tuple[set[str], AgentActivityConfig]] = []
+        for agent in poster_eligible_agents:
+            etype = normalize_label(agent.entity_type)
             if etype not in agents_by_type:
                 agents_by_type[etype] = []
             agents_by_type[etype].append(agent)
+
+            for entity_name_key in build_name_variants(agent.entity_name):
+                if entity_name_key not in agents_by_name:
+                    agents_by_name[entity_name_key] = []
+                agents_by_name[entity_name_key].append(agent)
+
+            meaningful_tokens = {
+                token for token in tokenize_label(agent.entity_name)
+                if token not in {'the', 'a', 'an'}
+            }
+            if meaningful_tokens:
+                agent_name_tokens.append((meaningful_tokens, agent))
         
         # 类型映射表（处理 LLM 可能输出的不同格式）
         type_aliases = {
             "official": ["official", "university", "governmentagency", "government"],
             "university": ["university", "official"],
             "mediaoutlet": ["mediaoutlet", "media"],
-            "student": ["student", "person"],
-            "professor": ["professor", "expert", "teacher"],
-            "alumni": ["alumni", "person"],
+            "student": ["student", "person", "actor"],
+            "professor": ["professor", "expert", "teacher", "actor"],
+            "alumni": ["alumni", "person", "actor"],
             "organization": ["organization", "ngo", "company", "group"],
-            "person": ["person", "student", "alumni"],
+            "person": ["person", "student", "alumni", "actor", "character"],
+            "actor": ["actor", "person", "character", "student", "alumni", "professor"],
         }
         
         # 记录每种类型已使用的 agent 索引，避免重复使用同一个 agent
         used_indices: Dict[str, int] = {}
+        normalized_posts = self._normalize_initial_posts(event_config.initial_posts)
         
         updated_posts = []
-        for post in event_config.initial_posts:
-            poster_type = post.get("poster_type", "").lower()
+        for post in normalized_posts:
+            poster_type = post.get("poster_type", "")
+            poster_type_key = normalize_label(poster_type)
             content = post.get("content", "")
+            content_key = normalize_label(content)
             
             # 尝试找到匹配的 agent
             matched_agent_id = None
+
+            # 1. poster_type 实际上可能是实体名称，先做名称精确匹配
+            if poster_type_key in agents_by_name:
+                matched_agent = choose_agent(agents_by_name[poster_type_key], f"name:{poster_type_key}")
+                matched_agent_id = matched_agent.agent_id if matched_agent else None
+
+            # 2. 从内容中识别被点名的实体（优先选择名字更长、更具体的匹配）
+            if matched_agent_id is None and content_key:
+                content_name_matches = []
+                for agent_name_key, candidates in agents_by_name.items():
+                    if agent_name_key and agent_name_key in content_key:
+                        content_name_matches.append((len(agent_name_key), agent_name_key, candidates))
+                if content_name_matches:
+                    _, matched_name_key, candidates = max(content_name_matches, key=lambda item: item[0])
+                    matched_agent = choose_agent(candidates, f"content:{matched_name_key}")
+                    matched_agent_id = matched_agent.agent_id if matched_agent else None
+
+            # 2.5. 使用 token 集合匹配变体名，例如 "Captain Aria" -> "Aria the Captain"
+            if matched_agent_id is None and content:
+                content_tokens = set(tokenize_label(content))
+                token_matches = []
+                for candidate_tokens, agent in agent_name_tokens:
+                    if len(candidate_tokens) >= 2 and candidate_tokens.issubset(content_tokens):
+                        token_matches.append((len(candidate_tokens), len(''.join(sorted(candidate_tokens))), agent))
+
+                if token_matches:
+                    _, _, matched_agent = max(token_matches, key=lambda item: (item[0], item[1]))
+                    matched_agent_id = matched_agent.agent_id
             
-            # 1. 直接匹配
-            if poster_type in agents_by_type:
-                agents = agents_by_type[poster_type]
-                idx = used_indices.get(poster_type, 0) % len(agents)
-                matched_agent_id = agents[idx].agent_id
-                used_indices[poster_type] = idx + 1
-            else:
-                # 2. 使用别名匹配
+            # 3. 类型直接匹配
+            if matched_agent_id is None and poster_type_key in agents_by_type:
+                matched_agent = choose_agent(agents_by_type[poster_type_key], f"type:{poster_type_key}")
+                matched_agent_id = matched_agent.agent_id if matched_agent else None
+            elif matched_agent_id is None:
+                # 4. 使用别名匹配
                 for alias_key, aliases in type_aliases.items():
-                    if poster_type in aliases or alias_key == poster_type:
+                    if poster_type_key in aliases or alias_key == poster_type_key:
                         for alias in aliases:
                             if alias in agents_by_type:
-                                agents = agents_by_type[alias]
-                                idx = used_indices.get(alias, 0) % len(agents)
-                                matched_agent_id = agents[idx].agent_id
-                                used_indices[alias] = idx + 1
+                                matched_agent = choose_agent(agents_by_type[alias], f"alias:{alias}")
+                                matched_agent_id = matched_agent.agent_id if matched_agent else None
                                 break
                     if matched_agent_id is not None:
                         break
             
-            # 3. 如果仍未找到，使用影响力最高的 agent
+            # 5. 如果仍未找到，使用影响力最高的 poster-eligible agent
             if matched_agent_id is None:
-                logger.warning(f"未找到类型 '{poster_type}' 的匹配 Agent，使用影响力最高的 Agent")
-                if agent_configs:
+                logger.warning(f"未找到类型 '{poster_type_key}' 的匹配 Agent，使用影响力最高的 Agent")
+                if poster_eligible_agents:
                     # 按影响力排序，选择影响力最高的
-                    sorted_agents = sorted(agent_configs, key=lambda a: a.influence_weight, reverse=True)
+                    sorted_agents = sorted(poster_eligible_agents, key=lambda a: a.influence_weight, reverse=True)
                     matched_agent_id = sorted_agents[0].agent_id
                 else:
                     matched_agent_id = 0
@@ -823,44 +1050,44 @@ class SimulationConfigGenerator:
                 "summary": e.summary[:summary_len] if e.summary else ""
             })
         
-        prompt = f"""基于以下信息，为每个实体生成公开行为活动配置。
+        prompt = f"""Generate public activity configurations for each entity using the scenario information below.
 
-模拟需求: {simulation_requirement}
+Simulation requirement: {simulation_requirement}
 
-## 实体列表
+## Entity list
 ```json
 {json.dumps(entity_list, ensure_ascii=False, indent=2)}
 ```
 
-## 任务
-为每个实体生成活动配置，注意：
-- **优先遵循世界观与身份逻辑**：如果给定设定中存在明确作息、制度、宗教节律、战争状态或种族特征，应优先服从这些规则
-- **若信息不足，可使用通用昼夜模式**：凌晨0-5点低活跃，晚间19-22点相对高活跃
-- **机构/官方角色**（如 University/GovernmentAgency/Organization）：活跃度偏低，表达克制，响应较慢，但影响力较高
-- **媒体/公告/传令渠道**（如 MediaOutlet）：活跃度中高，覆盖时段较广，响应较快，影响力较高
-- **个人角色**（如 Student/Person/Alumni）：活跃度中高，但必须结合身份、阶层、职责和世界规则调整
-- **领导者/专家/代表人物**：活跃度中等，影响力中高，表达更具立场和代表性
+## Task
+Generate an activity configuration for each entity. Follow these rules:
+- **Respect worldbuilding and identity logic first**: if the scenario defines clear routines, institutions, religious rhythms, wartime conditions, or species traits, follow those rules before using generic assumptions.
+- **If information is limited, fall back to a generic day-night pattern**: low activity from 00:00-05:00 and relatively high activity from 19:00-22:00.
+- **Institutional or official roles** (such as University, GovernmentAgency, Organization): lower activity, more restrained tone, slower response, but higher influence.
+- **Media, announcement, or messenger channels** (such as MediaOutlet): medium-to-high activity, wider active-hour coverage, faster response, higher influence.
+- **Personal roles** (such as Student, Person, Alumni): medium-to-high activity, but still adjusted to identity, class, duty, and world rules.
+- **Leaders, experts, or representatives**: medium activity, medium-to-high influence, and stronger position-taking.
 
-返回JSON格式（不要markdown）：
+Return JSON only (no markdown):
 {{
     "agent_configs": [
         {{
-            "agent_id": <必须与输入一致>,
+            "agent_id": <must match the input exactly>,
             "activity_level": <0.0-1.0>,
-            "posts_per_hour": <发帖频率>,
-            "comments_per_hour": <评论频率>,
-            "active_hours": [<活跃小时列表，结合世界规则与身份作息>],
-            "response_delay_min": <最小响应延迟分钟>,
-            "response_delay_max": <最大响应延迟分钟>,
-            "sentiment_bias": <-1.0到1.0>,
+            "posts_per_hour": <posting frequency>,
+            "comments_per_hour": <comment frequency>,
+            "active_hours": [<active hours adjusted to world rules and role routine>],
+            "response_delay_min": <minimum response delay in minutes>,
+            "response_delay_max": <maximum response delay in minutes>,
+            "sentiment_bias": <-1.0 to 1.0>,
             "stance": "<supportive/opposing/neutral/observer>",
-            "influence_weight": <影响力权重>
+            "influence_weight": <influence weight>
         }},
         ...
     ]
 }}"""
 
-        system_prompt = "你是情景推演中的角色行为配置专家。返回纯JSON，优先服从世界观、身份与制度约束；信息不足时再使用通用昼夜节律。"
+        system_prompt = "You are an expert in configuring agent behavior for scenario simulations. Return pure JSON. Follow worldbuilding, identity, and institutional constraints first; only fall back to a generic day-night rhythm when necessary."
         
         try:
             result = self._call_llm_with_retry(prompt, system_prompt)
@@ -887,7 +1114,10 @@ class SimulationConfigGenerator:
                 activity_level=cfg.get("activity_level", 0.5),
                 posts_per_hour=cfg.get("posts_per_hour", 0.5),
                 comments_per_hour=cfg.get("comments_per_hour", 1.0),
-                active_hours=cfg.get("active_hours", list(range(9, 23))),
+                active_hours=self._normalize_hour_list(
+                    cfg.get("active_hours"),
+                    list(range(9, 23))
+                ),
                 response_delay_min=cfg.get("response_delay_min", 5),
                 response_delay_max=cfg.get("response_delay_max", 60),
                 sentiment_bias=cfg.get("sentiment_bias", 0.0),

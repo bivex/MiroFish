@@ -106,7 +106,7 @@ class CogneeGraphBuilderService:
         for i in range(0, total_chunks, batch_size):
             if progress_callback:
                 batch_num = i // batch_size + 1
-                progress_callback(f"准备 Cognee 数据批次 {batch_num}/{total_batches}...", min((batch_num / total_batches) * 0.4, 0.4))
+                progress_callback(f"Preparing Cognee data batch {batch_num}/{total_batches}...", min((batch_num / total_batches) * 0.4, 0.4))
 
         self._persist_projection_semantic_types(graph_id, chunks)
 
@@ -121,7 +121,7 @@ class CogneeGraphBuilderService:
         self._graph_cache[graph_id] = self._format_graph_data(graph_id, graph_data)
 
         if progress_callback:
-            progress_callback("Cognee 图谱构建完成", 1.0)
+            progress_callback("Cognee graph build complete", 1.0)
 
         return [graph_id]
 
@@ -138,7 +138,7 @@ class CogneeGraphBuilderService:
     ):
         del episode_uuids, timeout
         if progress_callback:
-            progress_callback("Cognee 数据已同步，无需额外等待", 1.0)
+            progress_callback("Cognee data is already synced; no extra wait required", 1.0)
 
     def delete_graph(self, graph_id: str):
         self.sidecar.delete_graph(graph_id)

@@ -46,7 +46,7 @@ def test_validate_graph_backend_only_requires_zep_key(monkeypatch):
     monkeypatch.setattr(Config, "ZEP_API_KEY", None, raising=False)
     monkeypatch.setattr(Config, "GRAPH_BACKEND", "zep", raising=False)
 
-    assert factory_module.validate_graph_backend_requirements("zep") == ["ZEP_API_KEY 未配置"]
+    assert factory_module.validate_graph_backend_requirements("zep") == ["ZEP_API_KEY is not configured"]
     assert factory_module.validate_graph_backend_requirements("cognee") == []
 
 

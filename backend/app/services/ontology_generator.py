@@ -9,148 +9,141 @@ from ..utils.llm_client import LLMClient
 from ..config import Config
 
 
-# 本体生成的系统提示词
-ONTOLOGY_SYSTEM_PROMPT = """你是一个专业的知识图谱本体设计专家。你的任务是分析给定的文本内容和模拟需求，设计适合**情景推演 / 社会投影模拟**的实体类型和关系类型。
+# Ontology-generation system prompt
+ONTOLOGY_SYSTEM_PROMPT = """You are an expert knowledge-graph ontology designer. Analyze the supplied text and simulation requirement, then design entity types and relationship types suitable for **scenario simulation / social projection simulation**.
 
-**重要：你必须输出有效的JSON格式数据，不要输出任何其他内容。**
+Important: you must return valid JSON and nothing else.
 
-## 核心任务背景
+## Core task background
 
-我们正在构建一个**基于世界观与情景的模拟系统**。在这个系统中：
-- 每个实体都应该是一个可以在情境中发声、行动、代表某个立场、传播信息或影响他人的主体
-- 这些主体既可以是个人，也可以是组织、派系、机构、代表性渠道或具有公共影响力的角色
-- 世界观可能是现代、历史、架空、奇幻或科幻，不要强行现代化
+We are building a simulation system grounded in worldbuilding and scenario logic. In this system:
+- every entity should be a subject that can speak, act, represent a position, spread information, or influence others
+- these subjects may be individuals, organizations, factions, institutions, representative channels, or other publicly expressive actors
+- the world may be modern, historical, alternate, fantasy, or science-fiction; do not force it into a modern setting
 
-因此，**实体必须优先选择可被投影为 actor / organization / representative channel 的主体**：
+Therefore, entity types should prioritize subjects that can be projected as actors, organizations, or representative channels.
 
-**可以是**：
-- 具体个人（当事人、领导者、学者、记者、骑士、祭司、商人、探险者等）
-- 组织机构（大学、王室、教团、行会、军团、公司、媒体、议会、研究院等）
-- 具有公共表达能力的代表性群体或渠道
-- 能在情景中产生公开行为、态度表达、命令、回应、传播或协调作用的主体
+## What can count as an entity type
+- specific people such as participants, leaders, scholars, journalists, knights, priests, merchants, explorers, and similar roles
+- organizations such as universities, royal courts, religious orders, guilds, legions, companies, media outlets, councils, academies, and similar bodies
+- representative groups or channels with public expressive capacity
+- subjects that can generate public actions, attitudes, commands, responses, propagation, or coordination in the scenario
 
-**不可以是**：
-- 抽象概念（如"舆论"、"情绪"、"趋势"、"命运"）
-- 主题/话题（如"学术诚信"、"教育改革"、"资源危机"）
-- 观点/态度（如"支持方"、"反对方"）
-- 不能被映射为行动主体或代表渠道的纯背景元素
+## What must not count as an entity type
+- abstract concepts such as public opinion, emotion, trend, or fate
+- topics such as academic integrity, education reform, or resource crisis
+- positions such as supporters or opponents
+- pure background elements that cannot be mapped to an acting subject or representative channel
 
-## 输出格式
+## Output format
 
-请输出JSON格式，包含以下结构：
+Return JSON in this structure:
 
 ```json
 {
     "entity_types": [
         {
-            "name": "实体类型名称（英文，PascalCase）",
-            "description": "简短描述（英文，不超过100字符）",
+            "name": "Entity type name in English PascalCase",
+            "description": "Short English description under 100 characters",
             "attributes": [
                 {
-                    "name": "属性名（英文，snake_case）",
+                    "name": "attribute_name in English snake_case",
                     "type": "text",
-                    "description": "属性描述"
+                    "description": "English attribute description"
                 }
             ],
-            "examples": ["示例实体1", "示例实体2"]
+            "examples": ["Example entity 1", "Example entity 2"]
         }
     ],
     "edge_types": [
         {
-            "name": "关系类型名称（英文，UPPER_SNAKE_CASE）",
-            "description": "简短描述（英文，不超过100字符）",
+            "name": "RELATIONSHIP_NAME in English UPPER_SNAKE_CASE",
+            "description": "Short English description under 100 characters",
             "source_targets": [
-                {"source": "源实体类型", "target": "目标实体类型"}
+                {"source": "Source entity type", "target": "Target entity type"}
             ],
             "attributes": []
         }
     ],
-    "analysis_summary": "对文本内容的简要分析说明（中文）"
+    "analysis_summary": "Brief English analysis summary of the source text"
 }
 ```
 
-## 设计指南（极其重要！）
+## Design guide
 
-### 1. 实体类型设计 - 必须严格遵守
+### 1. Entity type design - must follow strictly
 
-**数量要求：必须正好10个实体类型**
+You must return exactly 10 entity types.
 
-**层次结构要求（必须同时包含具体类型和兜底类型）**：
+The 10 entity types must include both specific types and fallback types.
 
-你的10个实体类型必须包含以下层次：
+A. Fallback types (must be included as the last 2 items):
+   - `Person`: fallback for any individual not covered by a more specific person type
+   - `Organization`: fallback for any organization not covered by a more specific organization type
 
-A. **兜底类型（必须包含，放在列表最后2个）**：
-   - `Person`: 任何自然人个体的兜底类型。当一个人不属于其他更具体的人物类型时，归入此类。
-   - `Organization`: 任何组织机构的兜底类型。当一个组织不属于其他更具体的组织类型时，归入此类。
+B. Specific types (8 items derived from the text):
+   - design more specific types for the major roles present in the source material
+   - example for academic scenarios: `Student`, `Professor`, `University`
+   - example for business scenarios: `Company`, `CEO`, `Employee`
 
-B. **具体类型（8个，根据文本内容设计）**：
-   - 针对文本中出现的主要角色，设计更具体的类型
-   - 例如：如果文本涉及学术事件，可以有 `Student`, `Professor`, `University`
-   - 例如：如果文本涉及商业事件，可以有 `Company`, `CEO`, `Employee`
+Specific-type principles:
+- identify high-frequency or high-importance role categories from the text
+- each specific type should have a clear boundary and avoid unnecessary overlap
+- the description should clearly distinguish the type from its fallback category
 
-**为什么需要兜底类型**：
-- 文本中会出现各种人物，如"中小学教师"、"路人甲"、"某位网友"
-- 如果没有专门的类型匹配，他们应该被归入 `Person`
-- 同理，小型组织、临时团体等应该归入 `Organization`
+### 2. Relationship type design
 
-**具体类型的设计原则**：
-- 从文本中识别出高频出现或关键的角色类型
-- 每个具体类型应该有明确的边界，避免重叠
-- description 必须清晰说明这个类型和兜底类型的区别
+- return 6 to 10 relationship types
+- relationships should reflect concrete ties, representation, influence paths, cooperation, conflict, command, propagation, or response patterns in the scenario
+- make sure source_targets cover the entity types you define
 
-### 2. 关系类型设计
+### 3. Attribute design
 
-- 数量：6-10个
-- 关系应该反映情景中的真实联系、代表关系、影响路径、合作、冲突、命令、传播或回应
-- 确保关系的 source_targets 涵盖你定义的实体类型
+- each entity type should have 1 to 3 key attributes
+- do not use reserved names such as `name`, `uuid`, `group_id`, `created_at`, or `summary`
+- preferred attribute names include `full_name`, `title`, `role`, `position`, `location`, and `description`
 
-### 3. 属性设计
+## Reference entity types
 
-- 每个实体类型1-3个关键属性
-- **注意**：属性名不能使用 `name`、`uuid`、`group_id`、`created_at`、`summary`（这些是系统保留字）
-- 推荐使用：`full_name`, `title`, `role`, `position`, `location`, `description` 等
+Specific person-like types:
+- Student
+- Professor
+- Journalist
+- Celebrity
+- Executive
+- Official
+- Lawyer
+- Doctor
 
-## 实体类型参考
+Fallback person-like type:
+- Person
 
-**个人类（具体）**：
-- Student: 学生
-- Professor: 教授/学者
-- Journalist: 记者
-- Celebrity: 明星/网红
-- Executive: 高管
-- Official: 政府官员
-- Lawyer: 律师
-- Doctor: 医生
+Specific organization-like types:
+- University
+- Company
+- GovernmentAgency
+- MediaOutlet
+- Hospital
+- School
+- NGO
 
-**个人类（兜底）**：
-- Person: 任何自然人（不属于上述具体类型时使用）
+Fallback organization-like type:
+- Organization
 
-**组织类（具体）**：
-- University: 高校
-- Company: 公司企业
-- GovernmentAgency: 政府机构
-- MediaOutlet: 媒体机构
-- Hospital: 医院
-- School: 中小学
-- NGO: 非政府组织
+## Reference relationship types
 
-**组织类（兜底）**：
-- Organization: 任何组织机构（不属于上述具体类型时使用）
-
-## 关系类型参考
-
-- WORKS_FOR: 工作于
-- STUDIES_AT: 就读于
-- AFFILIATED_WITH: 隶属于
-- REPRESENTS: 代表
-- REGULATES: 监管
-- REPORTS_ON: 报道
-- COMMENTS_ON: 评论
-- RESPONDS_TO: 回应
-- SUPPORTS: 支持
-- OPPOSES: 反对
-- COLLABORATES_WITH: 合作
-- COMPETES_WITH: 竞争
+- WORKS_FOR
+- STUDIES_AT
+- AFFILIATED_WITH
+- REPRESENTS
+- REGULATES
+- REPORTS_ON
+- COMMENTS_ON
+- RESPONDS_TO
+- SUPPORTS
+- OPPOSES
+- COLLABORATES_WITH
+- COMPETES_WITH
 """
 
 
@@ -222,35 +215,35 @@ class OntologyGenerator:
         # 如果文本超过5万字，截断（仅影响传给LLM的内容，不影响图谱构建）
         if len(combined_text) > self.MAX_TEXT_LENGTH_FOR_LLM:
             combined_text = combined_text[:self.MAX_TEXT_LENGTH_FOR_LLM]
-            combined_text += f"\n\n...(原文共{original_length}字，已截取前{self.MAX_TEXT_LENGTH_FOR_LLM}字用于本体分析)..."
+            combined_text += f"\n\n...(source text length: {original_length} characters; truncated to the first {self.MAX_TEXT_LENGTH_FOR_LLM} characters for ontology analysis)..."
         
-        message = f"""## 模拟需求
+        message = f"""## Simulation Requirement
 
 {simulation_requirement}
 
-## 文档内容
+## Source Documents
 
 {combined_text}
 """
         
         if additional_context:
             message += f"""
-## 额外说明
+## Additional Context
 
 {additional_context}
 """
         
         message += """
-请根据以上内容，设计适合情景推演与社会投影模拟的实体类型和关系类型。
+Design entity types and relationship types suitable for scenario simulation and social projection.
 
-**必须遵守的规则**：
-1. 必须正好输出10个实体类型
-2. 最后2个必须是兜底类型：Person（个人兜底）和 Organization（组织兜底）
-3. 前8个是根据文本内容设计的具体类型
-4. 优先选择能够成为 speaking actor、representative actor 或 organization channel 的主体
-5. 可以是现代、历史、奇幻、科幻或架空世界，不要强行改写成现代平台化语境
-6. 不能把抽象概念、纯议题、纯情绪当成实体类型
-7. 属性名不能使用 name、uuid、group_id 等保留字，用 full_name、org_name 等替代
+Rules you must follow:
+1. Return exactly 10 entity types
+2. The last 2 types must be the fallback types Person and Organization
+3. The first 8 types must be specific types derived from the source text
+4. Prioritize subjects that can act as speaking actors, representative actors, or organization channels
+5. The setting may be modern, historical, fantasy, science-fiction, or alternate; do not force it into a modern platform-native framing
+6. Do not turn abstract concepts, pure topics, or pure emotions into entity types
+7. Do not use reserved attribute names like name, uuid, or group_id; prefer names such as full_name or org_name instead
 """
         
         return message

@@ -148,7 +148,7 @@ class SimulationIPCClient:
         with open(command_file, 'w', encoding='utf-8') as f:
             json.dump(command.to_dict(), f, ensure_ascii=False, indent=2)
         
-        logger.info(f"发送IPC命令: {command_type.value}, command_id={command_id}")
+        logger.info(f"Sending IPC command: {command_type.value}, command_id={command_id}")
         
         # 等待响应
         response_file = os.path.join(self.responses_dir, f"{command_id}.json")
@@ -168,15 +168,15 @@ class SimulationIPCClient:
                     except OSError:
                         pass
                     
-                    logger.info(f"收到IPC响应: command_id={command_id}, status={response.status.value}")
+                    logger.info(f"Received IPC response: command_id={command_id}, status={response.status.value}")
                     return response
                 except (json.JSONDecodeError, KeyError) as e:
-                    logger.warning(f"解析响应失败: {e}")
+                    logger.warning(f"Failed to parse response: {e}")
             
             time.sleep(poll_interval)
         
         # 超时
-        logger.error(f"等待IPC响应超时: command_id={command_id}")
+        logger.error(f"Timed out waiting for IPC response: command_id={command_id}")
         
         # 清理命令文件
         try:
@@ -184,7 +184,7 @@ class SimulationIPCClient:
         except OSError:
             pass
         
-        raise TimeoutError(f"等待命令响应超时 ({timeout}秒)")
+        raise TimeoutError(f"Timed out waiting for command response ({timeout}s)")
     
     def send_interview(
         self,
