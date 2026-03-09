@@ -9,7 +9,10 @@ from flask import request, jsonify, send_file
 
 from . import simulation_bp
 from ..config import Config
-from ..services.zep_entity_reader import ZepEntityReader
+from ..services.graph_backend_factory import (
+    get_entity_reader_service,
+    validate_graph_backend_requirements,
+)
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
@@ -21,7 +24,7 @@ logger = get_logger('mirofish.api.simulation')
 
 # Interview prompt 优化前缀
 # 添加此前缀可以避免Agent调用工具，直接用文本回复
-INTERVIEW_PROMPT_PREFIX = "结合你的人设、所有的过往记忆与行动，不调用任何工具直接用文本回复我："
+INTERVIEW_PROMPT_PREFIX = "请严格遵循你的人设、身份、世界观设定、过往记忆与已发生行动，不调用任何工具，直接以该角色或机构的口吻用文本回复我："
 
 
 def optimize_interview_prompt(prompt: str) -> str:
@@ -56,10 +59,12 @@ def get_graph_entities(graph_id: str):
         enrich: 是否获取相关边信息（默认true）
     """
     try:
-        if not Config.ZEP_API_KEY:
+        graph_backend = request.args.get('graph_backend') or Config.get_graph_backend()
+        errors = validate_graph_backend_requirements(graph_backend)
+        if errors:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY未配置"
+                "error": "; ".join(errors)
             }), 500
         
         entity_types_str = request.args.get('entity_types', '')
@@ -68,7 +73,7 @@ def get_graph_entities(graph_id: str):
         
         logger.info(f"获取图谱实体: graph_id={graph_id}, entity_types={entity_types}, enrich={enrich}")
         
-        reader = ZepEntityReader()
+        reader = get_entity_reader_service(graph_backend=graph_backend)
         result = reader.filter_defined_entities(
             graph_id=graph_id,
             defined_entity_types=entity_types,
@@ -93,13 +98,15 @@ def get_graph_entities(graph_id: str):
 def get_entity_detail(graph_id: str, entity_uuid: str):
     """获取单个实体的详细信息"""
     try:
-        if not Config.ZEP_API_KEY:
+        graph_backend = request.args.get('graph_backend') or Config.get_graph_backend()
+        errors = validate_graph_backend_requirements(graph_backend)
+        if errors:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY未配置"
+                "error": "; ".join(errors)
             }), 500
         
-        reader = ZepEntityReader()
+        reader = get_entity_reader_service(graph_backend=graph_backend)
         entity = reader.get_entity_with_context(graph_id, entity_uuid)
         
         if not entity:
@@ -126,15 +133,17 @@ def get_entity_detail(graph_id: str, entity_uuid: str):
 def get_entities_by_type(graph_id: str, entity_type: str):
     """获取指定类型的所有实体"""
     try:
-        if not Config.ZEP_API_KEY:
+        graph_backend = request.args.get('graph_backend') or Config.get_graph_backend()
+        errors = validate_graph_backend_requirements(graph_backend)
+        if errors:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY未配置"
+                "error": "; ".join(errors)
             }), 500
         
         enrich = request.args.get('enrich', 'true').lower() == 'true'
         
-        reader = ZepEntityReader()
+        reader = get_entity_reader_service(graph_backend=graph_backend)
         entities = reader.get_entities_by_type(
             graph_id=graph_id,
             entity_type=entity_type,
@@ -208,6 +217,7 @@ def create_simulation():
             }), 404
         
         graph_id = data.get('graph_id') or project.graph_id
+        graph_backend = data.get('graph_backend') or project.graph_backend or Config.get_graph_backend()
         if not graph_id:
             return jsonify({
                 "success": False,
@@ -218,6 +228,7 @@ def create_simulation():
         state = manager.create_simulation(
             project_id=project_id,
             graph_id=graph_id,
+            graph_backend=graph_backend,
             enable_twitter=data.get('enable_twitter', True),
             enable_reddit=data.get('enable_reddit', True),
         )
@@ -471,7 +482,7 @@ def prepare_simulation():
         # 这样前端在调用prepare后立即就能获取到预期Agent总数
         try:
             logger.info(f"同步获取实体数量: graph_id={state.graph_id}")
-            reader = ZepEntityReader()
+            reader = get_entity_reader_service(graph_backend=state.graph_backend)
             # 快速读取实体（不需要边信息，只统计数量）
             filtered_preview = reader.filter_defined_entities(
                 graph_id=state.graph_id,
@@ -1395,8 +1406,9 @@ def generate_profiles():
         entity_types = data.get('entity_types')
         use_llm = data.get('use_llm', True)
         platform = data.get('platform', 'reddit')
+        graph_backend = data.get('graph_backend') or Config.get_graph_backend()
         
-        reader = ZepEntityReader()
+        reader = get_entity_reader_service(graph_backend=graph_backend)
         filtered = reader.filter_defined_entities(
             graph_id=graph_id,
             defined_entity_types=entity_types,
@@ -1409,7 +1421,7 @@ def generate_profiles():
                 "error": "没有找到符合条件的实体"
             }), 400
         
-        generator = OasisProfileGenerator()
+        generator = OasisProfileGenerator(graph_backend=graph_backend, graph_id=graph_id)
         profiles = generator.generate_profiles_from_entities(
             entities=filtered.entities,
             use_llm=use_llm
@@ -1578,6 +1590,7 @@ def start_simulation():
         
         # 获取图谱ID（用于图谱记忆更新）
         graph_id = None
+        graph_backend = state.graph_backend or Config.get_graph_backend()
         if enable_graph_memory_update:
             # 从模拟状态或项目中获取 graph_id
             graph_id = state.graph_id
@@ -1586,6 +1599,7 @@ def start_simulation():
                 project = ProjectManager.get_project(state.project_id)
                 if project:
                     graph_id = project.graph_id
+                    graph_backend = project.graph_backend or graph_backend
             
             if not graph_id:
                 return jsonify({
@@ -1601,7 +1615,8 @@ def start_simulation():
             platform=platform,
             max_rounds=max_rounds,
             enable_graph_memory_update=enable_graph_memory_update,
-            graph_id=graph_id
+            graph_id=graph_id,
+            graph_backend=graph_backend,
         )
         
         # 更新模拟状态
@@ -1613,6 +1628,7 @@ def start_simulation():
             response_data['max_rounds_applied'] = max_rounds
         response_data['graph_memory_update_enabled'] = enable_graph_memory_update
         response_data['force_restarted'] = force_restarted
+        response_data['graph_backend'] = graph_backend
         if enable_graph_memory_update:
             response_data['graph_id'] = graph_id
         

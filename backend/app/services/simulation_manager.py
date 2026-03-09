@@ -14,9 +14,9 @@ from enum import Enum
 
 from ..config import Config
 from ..utils.logger import get_logger
-from .zep_entity_reader import ZepEntityReader, FilteredEntities
-from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
-from .simulation_config_generator import SimulationConfigGenerator, SimulationParameters
+from .graph_backend_factory import get_entity_reader_service
+from .oasis_profile_generator import OasisProfileGenerator
+from .simulation_config_generator import SimulationConfigGenerator
 
 logger = get_logger('mirofish.simulation')
 
@@ -45,6 +45,7 @@ class SimulationState:
     simulation_id: str
     project_id: str
     graph_id: str
+    graph_backend: str = "zep"
     
     # 平台启用状态
     enable_twitter: bool = True
@@ -80,6 +81,7 @@ class SimulationState:
             "simulation_id": self.simulation_id,
             "project_id": self.project_id,
             "graph_id": self.graph_id,
+            "graph_backend": self.graph_backend,
             "enable_twitter": self.enable_twitter,
             "enable_reddit": self.enable_reddit,
             "status": self.status.value,
@@ -102,6 +104,7 @@ class SimulationState:
             "simulation_id": self.simulation_id,
             "project_id": self.project_id,
             "graph_id": self.graph_id,
+            "graph_backend": self.graph_backend,
             "status": self.status.value,
             "entities_count": self.entities_count,
             "profiles_count": self.profiles_count,
@@ -171,6 +174,7 @@ class SimulationManager:
             simulation_id=simulation_id,
             project_id=data.get("project_id", ""),
             graph_id=data.get("graph_id", ""),
+            graph_backend=data.get("graph_backend", "zep"),
             enable_twitter=data.get("enable_twitter", True),
             enable_reddit=data.get("enable_reddit", True),
             status=SimulationStatus(data.get("status", "created")),
@@ -194,6 +198,7 @@ class SimulationManager:
         self,
         project_id: str,
         graph_id: str,
+        graph_backend: str = "zep",
         enable_twitter: bool = True,
         enable_reddit: bool = True,
     ) -> SimulationState:
@@ -216,13 +221,16 @@ class SimulationManager:
             simulation_id=simulation_id,
             project_id=project_id,
             graph_id=graph_id,
+            graph_backend=graph_backend,
             enable_twitter=enable_twitter,
             enable_reddit=enable_reddit,
             status=SimulationStatus.CREATED,
         )
         
         self._save_simulation_state(state)
-        logger.info(f"创建模拟: {simulation_id}, project={project_id}, graph={graph_id}")
+        logger.info(
+            f"创建模拟: {simulation_id}, project={project_id}, graph={graph_id}, backend={graph_backend}"
+        )
         
         return state
     
@@ -270,9 +278,9 @@ class SimulationManager:
             
             # ========== 阶段1: 读取并过滤实体 ==========
             if progress_callback:
-                progress_callback("reading", 0, "正在连接Zep图谱...")
+                progress_callback("reading", 0, f"正在连接图谱后端 ({state.graph_backend})...")
             
-            reader = ZepEntityReader()
+            reader = get_entity_reader_service(graph_backend=state.graph_backend)
             
             if progress_callback:
                 progress_callback("reading", 30, "正在读取节点数据...")
@@ -311,8 +319,11 @@ class SimulationManager:
                     total=total_entities
                 )
             
-            # 传入graph_id以启用Zep检索功能，获取更丰富的上下文
-            generator = OasisProfileGenerator(graph_id=state.graph_id)
+            # 传入graph_id以启用图谱检索功能，获取更丰富的上下文
+            generator = OasisProfileGenerator(
+                graph_id=state.graph_id,
+                graph_backend=state.graph_backend,
+            )
             
             def profile_progress(current, total, msg):
                 if progress_callback:

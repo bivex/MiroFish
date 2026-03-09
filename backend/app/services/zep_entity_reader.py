@@ -4,68 +4,19 @@ Zep实体读取与过滤服务
 """
 
 import time
-from typing import Dict, Any, List, Optional, Set, Callable, TypeVar
-from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional, Callable, TypeVar
 
 from zep_cloud.client import Zep
 
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
+from .graph_entities import EntityNode, FilteredEntities
 
 logger = get_logger('mirofish.zep_entity_reader')
 
 # 用于泛型返回类型
 T = TypeVar('T')
-
-
-@dataclass
-class EntityNode:
-    """实体节点数据结构"""
-    uuid: str
-    name: str
-    labels: List[str]
-    summary: str
-    attributes: Dict[str, Any]
-    # 相关的边信息
-    related_edges: List[Dict[str, Any]] = field(default_factory=list)
-    # 相关的其他节点信息
-    related_nodes: List[Dict[str, Any]] = field(default_factory=list)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "uuid": self.uuid,
-            "name": self.name,
-            "labels": self.labels,
-            "summary": self.summary,
-            "attributes": self.attributes,
-            "related_edges": self.related_edges,
-            "related_nodes": self.related_nodes,
-        }
-    
-    def get_entity_type(self) -> Optional[str]:
-        """获取实体类型（排除默认的Entity标签）"""
-        for label in self.labels:
-            if label not in ["Entity", "Node"]:
-                return label
-        return None
-
-
-@dataclass
-class FilteredEntities:
-    """过滤后的实体集合"""
-    entities: List[EntityNode]
-    entity_types: Set[str]
-    total_count: int
-    filtered_count: int
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "entities": [e.to_dict() for e in self.entities],
-            "entity_types": list(self.entity_types),
-            "total_count": self.total_count,
-            "filtered_count": self.filtered_count,
-        }
 
 
 class ZepEntityReader:

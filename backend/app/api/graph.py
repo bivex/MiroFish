@@ -4,6 +4,7 @@
 """
 
 import os
+import json
 import traceback
 import threading
 from flask import request, jsonify
@@ -11,7 +12,11 @@ from flask import request, jsonify
 from . import graph_bp
 from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
-from ..services.graph_builder import GraphBuilderService
+from ..services.graph_backend_factory import (
+    get_graph_builder_service,
+    validate_graph_backend_requirements,
+)
+from ..services.projection_bundle_adapter import ProjectionBundleAdapter
 from ..services.text_processor import TextProcessor
 from ..utils.file_parser import FileParser
 from ..utils.logger import get_logger
@@ -117,6 +122,73 @@ def reset_project(project_id: str):
 
 
 # ============== 接口1：上传文件并生成本体 ==============
+
+@graph_bp.route('/projection/import', methods=['POST'])
+def import_projection_bundle():
+    """导入 social projection bundle，生成可直接用于 /build 的项目。"""
+    try:
+        logger.info("=== 开始导入 projection bundle ===")
+
+        data = request.get_json() or {}
+        simulation_requirement = data.get('simulation_requirement', '')
+        project_name = data.get('project_name', 'Projection Bundle Project')
+        additional_context = data.get('additional_context', '')
+        projection_bundle = data.get('projection_bundle')
+
+        if not simulation_requirement:
+            return jsonify({
+                "success": False,
+                "error": "请提供模拟需求描述 (simulation_requirement)"
+            }), 400
+
+        if projection_bundle is None:
+            projection_bundle = {
+                key: value for key, value in data.items()
+                if key not in {'project_name', 'simulation_requirement', 'additional_context'}
+            }
+
+        adapter = ProjectionBundleAdapter()
+        adapted = adapter.adapt(projection_bundle, additional_context=additional_context or None)
+        extracted_text = TextProcessor.preprocess_text(adapted['extracted_text'])
+
+        project = ProjectManager.create_project(name=project_name)
+        project.simulation_requirement = simulation_requirement
+        project.files = [{
+            "filename": "projection_bundle.json",
+            "size": len(json.dumps(adapted['bundle'], ensure_ascii=False).encode('utf-8'))
+        }]
+        project.total_text_length = len(extracted_text)
+        project.ontology = adapted['ontology']
+        project.analysis_summary = adapted['analysis_summary']
+        project.status = ProjectStatus.ONTOLOGY_GENERATED
+
+        ProjectManager.save_extracted_text(project.project_id, extracted_text)
+        ProjectManager.save_project(project)
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "project_id": project.project_id,
+                "project_name": project.name,
+                "ontology": project.ontology,
+                "analysis_summary": project.analysis_summary,
+                "files": project.files,
+                "total_text_length": project.total_text_length,
+                "recommended_prepare_entity_types": adapted['recommended_prepare_entity_types'],
+            }
+        })
+
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 400
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
 
 @graph_bp.route('/ontology/generate', methods=['POST'])
 def generate_ontology():
@@ -281,18 +353,7 @@ def build_graph():
     """
     try:
         logger.info("=== 开始构建图谱 ===")
-        
-        # 检查配置
-        errors = []
-        if not Config.ZEP_API_KEY:
-            errors.append("ZEP_API_KEY未配置")
-        if errors:
-            logger.error(f"配置错误: {errors}")
-            return jsonify({
-                "success": False,
-                "error": "配置错误: " + "; ".join(errors)
-            }), 500
-        
+
         # 解析请求
         data = request.get_json() or {}
         project_id = data.get('project_id')
@@ -334,6 +395,15 @@ def build_graph():
             project.graph_id = None
             project.graph_build_task_id = None
             project.error = None
+
+        graph_backend = data.get('graph_backend') or project.graph_backend or Config.get_graph_backend()
+        errors = validate_graph_backend_requirements(graph_backend)
+        if errors:
+            logger.error(f"配置错误: {errors}")
+            return jsonify({
+                "success": False,
+                "error": "配置错误: " + "; ".join(errors)
+            }), 500
         
         # 获取配置
         graph_name = data.get('graph_name', project.name or 'MiroFish Graph')
@@ -343,6 +413,7 @@ def build_graph():
         # 更新项目配置
         project.chunk_size = chunk_size
         project.chunk_overlap = chunk_overlap
+        project.graph_backend = graph_backend
         
         # 获取提取的文本
         text = ProjectManager.get_extracted_text(project_id)
@@ -382,7 +453,10 @@ def build_graph():
                 )
                 
                 # 创建图谱构建服务
-                builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
+                builder = get_graph_builder_service(
+                    graph_backend=graph_backend,
+                    api_key=Config.ZEP_API_KEY,
+                )
                 
                 # 分块
                 task_manager.update_task(
@@ -400,7 +474,7 @@ def build_graph():
                 # 创建图谱
                 task_manager.update_task(
                     task_id,
-                    message="创建Zep图谱...",
+                    message=f"创建图谱 ({graph_backend})...",
                     progress=10
                 )
                 graph_id = builder.create_graph(name=graph_name)
@@ -567,13 +641,15 @@ def get_graph_data(graph_id: str):
     获取图谱数据（节点和边）
     """
     try:
-        if not Config.ZEP_API_KEY:
+        graph_backend = request.args.get('graph_backend') or Config.get_graph_backend()
+        errors = validate_graph_backend_requirements(graph_backend)
+        if errors:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY未配置"
+                "error": "; ".join(errors)
             }), 500
         
-        builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
+        builder = get_graph_builder_service(graph_backend=graph_backend, api_key=Config.ZEP_API_KEY)
         graph_data = builder.get_graph_data(graph_id)
         
         return jsonify({
@@ -595,13 +671,15 @@ def delete_graph(graph_id: str):
     删除Zep图谱
     """
     try:
-        if not Config.ZEP_API_KEY:
+        graph_backend = request.args.get('graph_backend') or Config.get_graph_backend()
+        errors = validate_graph_backend_requirements(graph_backend)
+        if errors:
             return jsonify({
                 "success": False,
-                "error": "ZEP_API_KEY未配置"
+                "error": "; ".join(errors)
             }), 500
         
-        builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
+        builder = get_graph_builder_service(graph_backend=graph_backend, api_key=Config.ZEP_API_KEY)
         builder.delete_graph(graph_id)
         
         return jsonify({

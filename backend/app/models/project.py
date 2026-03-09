@@ -42,6 +42,7 @@ class Project:
     
     # 图谱信息（接口2完成后填充）
     graph_id: Optional[str] = None
+    graph_backend: str = "zep"
     graph_build_task_id: Optional[str] = None
     
     # 配置
@@ -65,6 +66,7 @@ class Project:
             "ontology": self.ontology,
             "analysis_summary": self.analysis_summary,
             "graph_id": self.graph_id,
+            "graph_backend": self.graph_backend,
             "graph_build_task_id": self.graph_build_task_id,
             "simulation_requirement": self.simulation_requirement,
             "chunk_size": self.chunk_size,
@@ -90,6 +92,7 @@ class Project:
             ontology=data.get('ontology'),
             analysis_summary=data.get('analysis_summary'),
             graph_id=data.get('graph_id'),
+            graph_backend=data.get('graph_backend', 'zep'),
             graph_build_task_id=data.get('graph_build_task_id'),
             simulation_requirement=data.get('simulation_requirement'),
             chunk_size=data.get('chunk_size', 500),
@@ -150,7 +153,8 @@ class ProjectManager:
             name=name,
             status=ProjectStatus.CREATED,
             created_at=now,
-            updated_at=now
+            updated_at=now,
+            graph_backend=Config.get_graph_backend(),
         )
         
         # 创建项目目录结构

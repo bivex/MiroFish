@@ -10,6 +10,7 @@ from flask import request, jsonify, send_file
 
 from . import report_bp
 from ..config import Config
+from ..services.graph_backend_factory import get_report_tools_service
 from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
 from ..services.simulation_manager import SimulationManager
 from ..models.project import ProjectManager
@@ -99,6 +100,7 @@ def generate_report():
             }), 400
         
         simulation_requirement = project.simulation_requirement
+        graph_backend = state.graph_backend or project.graph_backend or Config.get_graph_backend()
         if not simulation_requirement:
             return jsonify({
                 "success": False,
@@ -134,7 +136,8 @@ def generate_report():
                 agent = ReportAgent(
                     graph_id=graph_id,
                     simulation_id=simulation_id,
-                    simulation_requirement=simulation_requirement
+                    simulation_requirement=simulation_requirement,
+                    graph_backend=graph_backend,
                 )
                 
                 # 进度回调
@@ -535,12 +538,14 @@ def chat_with_report_agent():
             }), 400
         
         simulation_requirement = project.simulation_requirement or ""
+        graph_backend = state.graph_backend or project.graph_backend or Config.get_graph_backend()
         
         # 创建Agent并进行对话
         agent = ReportAgent(
             graph_id=graph_id,
             simulation_id=simulation_id,
-            simulation_requirement=simulation_requirement
+            simulation_requirement=simulation_requirement,
+            graph_backend=graph_backend,
         )
         
         result = agent.chat(message=message, chat_history=chat_history)
@@ -952,9 +957,7 @@ def search_graph_tool():
                 "error": "请提供 graph_id 和 query"
             }), 400
         
-        from ..services.zep_tools import ZepToolsService
-        
-        tools = ZepToolsService()
+        tools = get_report_tools_service(graph_backend=data.get('graph_backend') or Config.get_graph_backend())
         result = tools.search_graph(
             graph_id=graph_id,
             query=query,
@@ -996,9 +999,7 @@ def get_graph_statistics_tool():
                 "error": "请提供 graph_id"
             }), 400
         
-        from ..services.zep_tools import ZepToolsService
-        
-        tools = ZepToolsService()
+        tools = get_report_tools_service(graph_backend=data.get('graph_backend') or Config.get_graph_backend())
         result = tools.get_graph_statistics(graph_id)
         
         return jsonify({

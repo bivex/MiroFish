@@ -21,13 +21,7 @@ from enum import Enum
 from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
-from .zep_tools import (
-    ZepToolsService, 
-    SearchResult, 
-    InsightForgeResult, 
-    PanoramaResult,
-    InterviewResult
-)
+from .graph_backend_factory import get_report_tools_service
 
 logger = get_logger('mirofish.report_agent')
 
@@ -495,11 +489,11 @@ TOOL_DESC_PANORAMA_SEARCH = """\
 这个工具用于获取模拟结果的完整全貌，特别适合了解事件演变过程。它会：
 1. 获取所有相关节点和关系
 2. 区分当前有效的事实和历史/过期的事实
-3. 帮助你了解舆情是如何演变的
+3. 帮助你了解局势或公共叙事是如何演变的
 
 【使用场景】
 - 需要了解事件的完整发展脉络
-- 需要对比不同阶段的舆情变化
+- 需要对比不同阶段的局势变化或叙事变化
 - 需要获取全面的实体和关系信息
 
 【返回内容】
@@ -549,29 +543,29 @@ TOOL_DESC_INTERVIEW_AGENTS = """\
 # ── 大纲规划 prompt ──
 
 PLAN_SYSTEM_PROMPT = """\
-你是一个「未来预测报告」的撰写专家，拥有对模拟世界的「上帝视角」——你可以洞察模拟中每一位Agent的行为、言论和互动。
+你是一个「情景推演分析报告」的撰写专家，拥有对模拟世界的「上帝视角」——你可以洞察模拟中每一位Agent的行为、言论和互动。
 
 【核心理念】
-我们构建了一个模拟世界，并向其中注入了特定的「模拟需求」作为变量。模拟世界的演化结果，就是对未来可能发生情况的预测。你正在观察的不是"实验数据"，而是"未来的预演"。
+我们构建了一个模拟世界，并向其中注入了特定的「模拟需求」作为变量。模拟世界的演化结果，是对某个世界、冲突或局势可能走向的情景推演。你正在观察的不是抽象实验数据，而是一次带有世界观和角色逻辑的推演结果。
 
 【你的任务】
-撰写一份「未来预测报告」，回答：
-1. 在我们设定的条件下，未来发生了什么？
+撰写一份「情景推演分析报告」，回答：
+1. 在我们设定的条件下，局势如何展开？
 2. 各类Agent（人群）是如何反应和行动？
-3. 这个模拟揭示了哪些值得关注的未来趋势和风险？
+3. 这个模拟揭示了哪些值得关注的趋势、风险、机会或权力变化？
 
 【报告定位】
-- ✅ 这是一份基于模拟的未来预测报告，揭示"如果这样，未来会怎样"
-- ✅ 聚焦于预测结果：事件走向、群体反应、涌现现象、潜在风险
-- ✅ 模拟世界中的Agent言行就是对未来人群行为的预测
+- ✅ 这是一份基于模拟的情景推演分析报告，揭示"在这样的设定和条件下，局势会如何发展"
+- ✅ 聚焦于推演结果：事件走向、群体反应、涌现现象、潜在风险与机会
+- ✅ 模拟世界中的Agent言行是该情景下的证据，不是随意想象
 - ❌ 不是对现实世界现状的分析
-- ❌ 不是泛泛而谈的舆情综述
+- ❌ 不是脱离设定的泛泛综述
 
 【章节数量限制】
 - 最少2个章节，最多5个章节
 - 不需要子章节，每个章节直接撰写完整内容
-- 内容要精炼，聚焦于核心预测发现
-- 章节结构由你根据预测结果自主设计
+- 内容要精炼，聚焦于核心推演发现
+- 章节结构由你根据推演结果自主设计
 
 请输出JSON格式的报告大纲，格式如下：
 {
@@ -588,7 +582,7 @@ PLAN_SYSTEM_PROMPT = """\
 注意：sections数组最少2个，最多5个元素！"""
 
 PLAN_USER_PROMPT_TEMPLATE = """\
-【预测场景设定】
+【情景设定】
 我们向模拟世界注入的变量（模拟需求）：{simulation_requirement}
 
 【模拟世界规模】
@@ -597,26 +591,26 @@ PLAN_USER_PROMPT_TEMPLATE = """\
 - 实体类型分布: {entity_types}
 - 活跃Agent数量: {total_entities}
 
-【模拟预测到的部分未来事实样本】
+【模拟推演得到的部分事实样本】
 {related_facts_json}
 
-请以「上帝视角」审视这个未来预演：
-1. 在我们设定的条件下，未来呈现出了什么样的状态？
+请以「上帝视角」审视这次情景推演：
+1. 在我们设定的条件下，局势呈现出了什么样的状态？
 2. 各类人群（Agent）是如何反应和行动的？
-3. 这个模拟揭示了哪些值得关注的未来趋势？
+3. 这个模拟揭示了哪些值得关注的趋势、风险、机会或结构性变化？
 
-根据预测结果，设计最合适的报告章节结构。
+根据推演结果，设计最合适的报告章节结构。
 
-【再次提醒】报告章节数量：最少2个，最多5个，内容要精炼聚焦于核心预测发现。"""
+【再次提醒】报告章节数量：最少2个，最多5个，内容要精炼聚焦于核心推演发现。"""
 
 # ── 章节生成 prompt ──
 
 SECTION_SYSTEM_PROMPT_TEMPLATE = """\
-你是一个「未来预测报告」的撰写专家，正在撰写报告的一个章节。
+你是一个「情景推演分析报告」的撰写专家，正在撰写报告的一个章节。
 
 报告标题: {report_title}
 报告摘要: {report_summary}
-预测场景（模拟需求）: {simulation_requirement}
+情景条件（模拟需求）: {simulation_requirement}
 
 当前要撰写的章节: {section_title}
 
@@ -624,32 +618,32 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
 【核心理念】
 ═══════════════════════════════════════════════════════════════
 
-模拟世界是对未来的预演。我们向模拟世界注入了特定条件（模拟需求），
-模拟中Agent的行为和互动，就是对未来人群行为的预测。
+模拟世界是一次带有世界观与角色约束的情景推演。我们向模拟世界注入了特定条件（模拟需求），
+模拟中Agent的行为和互动，就是该情景下局势演化的证据。
 
 你的任务是：
-- 揭示在设定条件下，未来发生了什么
-- 预测各类人群（Agent）是如何反应和行动的
-- 发现值得关注的未来趋势、风险和机会
+- 揭示在设定条件下，局势如何展开
+- 说明各类Agent是如何反应、行动、结盟、冲突或传播信息的
+- 发现值得关注的趋势、风险、机会和结构性变化
 
 ❌ 不要写成对现实世界现状的分析
-✅ 要聚焦于"未来会怎样"——模拟结果就是预测的未来
+✅ 要聚焦于"在该设定下会如何发展"——模拟结果就是情景推演证据
 
 ═══════════════════════════════════════════════════════════════
 【最重要的规则 - 必须遵守】
 ═══════════════════════════════════════════════════════════════
 
 1. 【必须调用工具观察模拟世界】
-   - 你正在以「上帝视角」观察未来的预演
+   - 你正在以「上帝视角」观察一次情景推演
    - 所有内容必须来自模拟世界中发生的事件和Agent言行
    - 禁止使用你自己的知识来编写报告内容
-   - 每个章节至少调用3次工具（最多5次）来观察模拟的世界，它代表了未来
+   - 每个章节至少调用3次工具（最多5次）来观察模拟的世界，它代表了该情景的演化结果
 
 2. 【必须引用Agent的原始言行】
-   - Agent的发言和行为是对未来人群行为的预测
+   - Agent的发言和行为是该情景中的关键证据
    - 在报告中使用引用格式展示这些预测，例如：
      > "某类人群会表示：原文内容..."
-   - 这些引用是模拟预测的核心证据
+   - 这些引用是情景推演的核心证据
 
 3. 【语言一致性 - 引用内容必须翻译为报告语言】
    - 工具返回的内容可能包含英文或中英文混杂的表述
@@ -658,8 +652,8 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
    - 翻译时保持原意不变，确保表述自然通顺
    - 这一规则同时适用于正文和引用块（> 格式）中的内容
 
-4. 【忠实呈现预测结果】
-   - 报告内容必须反映模拟世界中的代表未来的模拟结果
+4. 【忠实呈现推演结果】
+   - 报告内容必须忠实反映模拟世界中的推演结果
    - 不要添加模拟中不存在的信息
    - 如果某方面信息不足，如实说明
 
@@ -676,13 +670,13 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
 
 【正确示例】
 ```
-本章节分析了事件的舆论传播态势。通过对模拟数据的深入分析，我们发现...
+本章节分析了事件在当前情景中的传播与扩散态势。通过对模拟数据的深入分析，我们发现...
 
 **首发引爆阶段**
 
-微博作为舆情的第一现场，承担了信息首发的核心功能：
+关键公共渠道在信息首发阶段承担了核心传播功能：
 
-> "微博贡献了68%的首发声量..."
+> "该渠道贡献了68%的首发传播量..."
 
 **情绪放大阶段**
 
@@ -821,24 +815,24 @@ REACT_TOOL_LIMIT_MSG = (
 
 REACT_UNUSED_TOOLS_HINT = "\n💡 你还没有使用过: {unused_list}，建议尝试不同工具获取多角度信息"
 
-REACT_FORCE_FINAL_MSG = "已达到工具调用限制，请直接输出 Final Answer: 并生成章节内容。"
+REACT_FORCE_FINAL_MSG = "已达到工具调用限制，请直接输出 Final Answer: 并生成基于证据的章节内容。"
 
 # ── Chat prompt ──
 
 CHAT_SYSTEM_PROMPT_TEMPLATE = """\
-你是一个简洁高效的模拟预测助手。
+你是一个简洁高效的情景推演助手。
 
 【背景】
-预测条件: {simulation_requirement}
+情景条件: {simulation_requirement}
 
-【已生成的分析报告】
+【已生成的推演分析报告】
 {report_content}
 
 【规则】
 1. 优先基于上述报告内容回答问题
 2. 直接回答问题，避免冗长的思考论述
 3. 仅在报告内容不足以回答时，才调用工具检索更多数据
-4. 回答要简洁、清晰、有条理
+4. 回答要简洁、清晰、有条理，忠于设定与推演结果
 
 【可用工具】（仅在需要时使用，最多调用1-2次）
 {tools_description}
@@ -886,7 +880,8 @@ class ReportAgent:
         simulation_id: str,
         simulation_requirement: str,
         llm_client: Optional[LLMClient] = None,
-        zep_tools: Optional[ZepToolsService] = None
+        zep_tools: Optional[Any] = None,
+        graph_backend: Optional[str] = None,
     ):
         """
         初始化Report Agent
@@ -901,9 +896,10 @@ class ReportAgent:
         self.graph_id = graph_id
         self.simulation_id = simulation_id
         self.simulation_requirement = simulation_requirement
+        self.graph_backend = graph_backend or Config.get_graph_backend()
         
-        self.llm = llm_client or LLMClient()
-        self.zep_tools = zep_tools or ZepToolsService()
+        self.llm = llm_client or LLMClient(model=Config.get_stage_model('report'))
+        self.zep_tools = zep_tools or get_report_tools_service(graph_backend=self.graph_backend)
         
         # 工具定义
         self.tools = self._define_tools()
@@ -913,7 +909,9 @@ class ReportAgent:
         # 控制台日志记录器（在 generate_report 中初始化）
         self.console_logger: Optional[ReportConsoleLogger] = None
         
-        logger.info(f"ReportAgent 初始化完成: graph_id={graph_id}, simulation_id={simulation_id}")
+        logger.info(
+            f"ReportAgent 初始化完成: graph_id={graph_id}, simulation_id={simulation_id}, backend={self.graph_backend}"
+        )
     
     def _define_tools(self) -> Dict[str, Dict[str, Any]]:
         """定义可用工具"""
@@ -1208,12 +1206,12 @@ class ReportAgent:
             logger.error(f"大纲规划失败: {str(e)}")
             # 返回默认大纲（3个章节，作为fallback）
             return ReportOutline(
-                title="未来预测报告",
-                summary="基于模拟预测的未来趋势与风险分析",
+                title="情景推演分析报告",
+                summary="基于模拟推演的趋势、风险与机会分析",
                 sections=[
-                    ReportSection(title="预测场景与核心发现"),
-                    ReportSection(title="人群行为预测分析"),
-                    ReportSection(title="趋势展望与风险提示")
+                    ReportSection(title="情景与核心发现"),
+                    ReportSection(title="参与方行为分析"),
+                    ReportSection(title="趋势、风险与机会")
                 ]
             )
     

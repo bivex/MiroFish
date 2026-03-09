@@ -20,7 +20,7 @@ from queue import Queue
 
 from ..config import Config
 from ..utils.logger import get_logger
-from .zep_graph_memory_updater import ZepGraphMemoryManager
+from .graph_backend_factory import get_graph_memory_manager_class
 from .simulation_ipc import SimulationIPCClient, CommandType, IPCResponse
 
 logger = get_logger('mirofish.simulation_runner')
@@ -225,6 +225,12 @@ class SimulationRunner:
     
     # 图谱记忆更新配置
     _graph_memory_enabled: Dict[str, bool] = {}  # simulation_id -> enabled
+    _graph_memory_backends: Dict[str, str] = {}  # simulation_id -> backend
+
+    @classmethod
+    def _get_graph_memory_manager(cls, simulation_id: str):
+        backend = cls._graph_memory_backends.get(simulation_id) or Config.get_graph_backend()
+        return get_graph_memory_manager_class(graph_backend=backend)
     
     @classmethod
     def get_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
@@ -315,7 +321,8 @@ class SimulationRunner:
         platform: str = "parallel",  # twitter / reddit / parallel
         max_rounds: int = None,  # 最大模拟轮数（可选，用于截断过长的模拟）
         enable_graph_memory_update: bool = False,  # 是否将活动更新到Zep图谱
-        graph_id: str = None  # Zep图谱ID（启用图谱更新时必需）
+        graph_id: str = None,  # Zep图谱ID（启用图谱更新时必需）
+        graph_backend: str = None,
     ) -> SimulationRunState:
         """
         启动模拟
@@ -374,14 +381,17 @@ class SimulationRunner:
                 raise ValueError("启用图谱记忆更新时必须提供 graph_id")
             
             try:
-                ZepGraphMemoryManager.create_updater(simulation_id, graph_id)
+                memory_manager = get_graph_memory_manager_class(graph_backend=graph_backend)
+                memory_manager.create_updater(simulation_id, graph_id)
                 cls._graph_memory_enabled[simulation_id] = True
+                cls._graph_memory_backends[simulation_id] = graph_backend or Config.get_graph_backend()
                 logger.info(f"已启用图谱记忆更新: simulation_id={simulation_id}, graph_id={graph_id}")
             except Exception as e:
                 logger.error(f"创建图谱记忆更新器失败: {e}")
                 cls._graph_memory_enabled[simulation_id] = False
         else:
             cls._graph_memory_enabled[simulation_id] = False
+            cls._graph_memory_backends.pop(simulation_id, None)
         
         # 确定运行哪个脚本（脚本位于 backend/scripts/ 目录）
         if platform == "twitter":
@@ -551,11 +561,12 @@ class SimulationRunner:
             # 停止图谱记忆更新器
             if cls._graph_memory_enabled.get(simulation_id, False):
                 try:
-                    ZepGraphMemoryManager.stop_updater(simulation_id)
+                    cls._get_graph_memory_manager(simulation_id).stop_updater(simulation_id)
                     logger.info(f"已停止图谱记忆更新: simulation_id={simulation_id}")
                 except Exception as e:
                     logger.error(f"停止图谱记忆更新器失败: {e}")
                 cls._graph_memory_enabled.pop(simulation_id, None)
+                cls._graph_memory_backends.pop(simulation_id, None)
             
             # 清理进程资源
             cls._processes.pop(simulation_id, None)
@@ -599,7 +610,7 @@ class SimulationRunner:
         graph_memory_enabled = cls._graph_memory_enabled.get(state.simulation_id, False)
         graph_updater = None
         if graph_memory_enabled:
-            graph_updater = ZepGraphMemoryManager.get_updater(state.simulation_id)
+            graph_updater = cls._get_graph_memory_manager(state.simulation_id).get_updater(state.simulation_id)
         
         try:
             with open(log_path, 'r', encoding='utf-8') as f:
@@ -807,11 +818,12 @@ class SimulationRunner:
         # 停止图谱记忆更新器
         if cls._graph_memory_enabled.get(simulation_id, False):
             try:
-                ZepGraphMemoryManager.stop_updater(simulation_id)
+                cls._get_graph_memory_manager(simulation_id).stop_updater(simulation_id)
                 logger.info(f"已停止图谱记忆更新: simulation_id={simulation_id}")
             except Exception as e:
                 logger.error(f"停止图谱记忆更新器失败: {e}")
             cls._graph_memory_enabled.pop(simulation_id, None)
+            cls._graph_memory_backends.pop(simulation_id, None)
         
         logger.info(f"模拟已停止: {simulation_id}")
         return state
@@ -1201,10 +1213,13 @@ class SimulationRunner:
         
         # 首先停止所有图谱记忆更新器（stop_all 内部会打印日志）
         try:
-            ZepGraphMemoryManager.stop_all()
+            backends = set(cls._graph_memory_backends.values()) or {Config.get_graph_backend()}
+            for backend in backends:
+                get_graph_memory_manager_class(graph_backend=backend).stop_all()
         except Exception as e:
             logger.error(f"停止图谱记忆更新器失败: {e}")
         cls._graph_memory_enabled.clear()
+        cls._graph_memory_backends.clear()
         
         # 复制字典以避免在迭代时修改
         processes = list(cls._processes.items())

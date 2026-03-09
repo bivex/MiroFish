@@ -19,6 +19,8 @@ else:
 
 class Config:
     """Flask配置类"""
+
+    SUPPORTED_GRAPH_BACKENDS = {'zep', 'cognee'}
     
     # Flask配置
     SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
@@ -32,8 +34,15 @@ class Config:
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
     
+    # Stage-specific model routing（未配置时回退到通用模型）
+    ONTOLOGY_LLM_MODEL = os.environ.get('ONTOLOGY_LLM_MODEL') or LLM_MODEL_NAME
+    PROFILE_LLM_MODEL = os.environ.get('PROFILE_LLM_MODEL') or LLM_MODEL_NAME
+    SIM_CONFIG_LLM_MODEL = os.environ.get('SIM_CONFIG_LLM_MODEL') or LLM_MODEL_NAME
+    REPORT_LLM_MODEL = os.environ.get('REPORT_LLM_MODEL') or LLM_MODEL_NAME
+    
     # Zep配置
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
+    GRAPH_BACKEND = os.environ.get('GRAPH_BACKEND', 'zep').lower()
     
     # 文件上传配置
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
@@ -62,6 +71,23 @@ class Config:
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
+
+    @classmethod
+    def get_stage_model(cls, stage: str) -> str:
+        """获取指定阶段的模型名，未命中时回退到通用模型。"""
+        stage_map = {
+            'ontology': cls.ONTOLOGY_LLM_MODEL,
+            'profile': cls.PROFILE_LLM_MODEL,
+            'sim_config': cls.SIM_CONFIG_LLM_MODEL,
+            'report': cls.REPORT_LLM_MODEL,
+        }
+        return stage_map.get(stage, cls.LLM_MODEL_NAME)
+
+    @classmethod
+    def get_graph_backend(cls) -> str:
+        """获取图谱后端配置，默认回退到 zep。"""
+        backend = (cls.GRAPH_BACKEND or 'zep').strip().lower()
+        return backend or 'zep'
     
     @classmethod
     def validate(cls):
@@ -69,7 +95,12 @@ class Config:
         errors = []
         if not cls.LLM_API_KEY:
             errors.append("LLM_API_KEY 未配置")
-        if not cls.ZEP_API_KEY:
+
+        backend = cls.get_graph_backend()
+        if backend not in cls.SUPPORTED_GRAPH_BACKENDS:
+            errors.append(f"GRAPH_BACKEND 不支持: {backend}")
+
+        if backend == 'zep' and not cls.ZEP_API_KEY:
             errors.append("ZEP_API_KEY 未配置")
         return errors
 

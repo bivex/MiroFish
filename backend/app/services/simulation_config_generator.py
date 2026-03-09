@@ -20,12 +20,12 @@ from openai import OpenAI
 
 from ..config import Config
 from ..utils.logger import get_logger
-from .zep_entity_reader import EntityNode, ZepEntityReader
+from .graph_entities import EntityNode
 
 logger = get_logger('mirofish.simulation_config')
 
-# 中国作息时间配置（北京时间）
-CHINA_TIMEZONE_CONFIG = {
+# 默认活动节律配置（可按世界观调整）
+DEFAULT_ACTIVITY_RHYTHM_CONFIG = {
     # 深夜时段（几乎无人活动）
     "dead_hours": [0, 1, 2, 3, 4, 5],
     # 早间时段（逐渐醒来）
@@ -81,7 +81,7 @@ class AgentActivityConfig:
 
 @dataclass  
 class TimeSimulationConfig:
-    """时间模拟配置（基于中国人作息习惯）"""
+    """时间模拟配置（默认昼夜节律，可按世界观调整）"""
     # 模拟总时长（模拟小时数）
     total_simulation_hours: int = 72  # 默认模拟72小时（3天）
     
@@ -92,11 +92,11 @@ class TimeSimulationConfig:
     agents_per_hour_min: int = 5
     agents_per_hour_max: int = 20
     
-    # 高峰时段（晚间19-22点，中国人最活跃的时间）
+    # 高峰时段（默认晚间19-22点，可按世界观调整）
     peak_hours: List[int] = field(default_factory=lambda: [19, 20, 21, 22])
     peak_activity_multiplier: float = 1.5
     
-    # 低谷时段（凌晨0-5点，几乎无人活动）
+    # 低谷时段（默认凌晨0-5点，几乎无人活动）
     off_peak_hours: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5])
     off_peak_activity_multiplier: float = 0.05  # 凌晨活跃度极低
     
@@ -229,7 +229,7 @@ class SimulationConfigGenerator:
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
-        self.model_name = model_name or Config.LLM_MODEL_NAME
+        self.model_name = model_name or Config.get_stage_model('sim_config')
         
         if not self.api_key:
             raise ValueError("LLM_API_KEY 未配置")
@@ -546,17 +546,13 @@ class SimulationConfigGenerator:
 ## 任务
 请生成时间配置JSON。
 
-### 基本原则（仅供参考，需根据具体事件和参与群体灵活调整）：
-- 用户群体为中国人，需符合北京时间作息习惯
-- 凌晨0-5点几乎无人活动（活跃度系数0.05）
-- 早上6-8点逐渐活跃（活跃度系数0.4）
-- 工作时间9-18点中等活跃（活跃度系数0.7）
-- 晚间19-22点是高峰期（活跃度系数1.5）
-- 23点后活跃度下降（活跃度系数0.5）
-- 一般规律：凌晨低活跃、早间渐增、工作时段中等、晚间高峰
+### 基本原则（仅供参考，需根据世界观、事件性质和参与群体灵活调整）：
+- 优先遵循给定世界观、角色身份、制度和生活节律
+- 如果没有明确世界规则，可使用通用昼夜活跃模式作为默认值
+- 默认模式：凌晨0-5点低活跃，早上6-8点逐渐活跃，白天9-18点中等活跃，晚间19-22点高峰，23点后回落
 - **重要**：以下示例值仅供参考，你需要根据事件性质、参与群体特点来调整具体时段
-  - 例如：学生群体高峰可能是21-23点；媒体全天活跃；官方机构只在工作时间
-  - 例如：突发热点可能导致深夜也有讨论，off_peak_hours 可适当缩短
+  - 例如：学生/学徒群体高峰可能是21-23点；媒体/传令渠道接近全天活跃；官方机构主要在办公时段发声
+  - 例如：夜行种族、战时状态、宗教仪式、节庆或突发危机都可能打破通用昼夜规律
 
 ### 返回JSON格式（不要markdown）
 
@@ -584,7 +580,7 @@ class SimulationConfigGenerator:
 - work_hours (int数组): 工作时段
 - reasoning (string): 简要说明为什么这样配置"""
 
-        system_prompt = "你是社交媒体模拟专家。返回纯JSON格式，时间配置需符合中国人作息习惯。"
+        system_prompt = "你是情景推演中的行为节律规划专家。返回纯JSON格式，优先遵循给定世界观和角色作息；若信息不足，再使用通用昼夜节律。"
         
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
@@ -593,7 +589,7 @@ class SimulationConfigGenerator:
             return self._get_default_time_config(num_entities)
     
     def _get_default_time_config(self, num_entities: int) -> Dict[str, Any]:
-        """获取默认时间配置（中国人作息）"""
+        """获取默认时间配置（通用昼夜节律）"""
         return {
             "total_simulation_hours": 72,
             "minutes_per_round": 60,  # 每轮1小时，加快时间流速
@@ -603,7 +599,7 @@ class SimulationConfigGenerator:
             "off_peak_hours": [0, 1, 2, 3, 4, 5],
             "morning_hours": [6, 7, 8],
             "work_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-            "reasoning": "使用默认中国人作息配置（每轮1小时）"
+            "reasoning": "使用默认昼夜节律配置（每轮1小时）"
         }
     
     def _parse_time_config(self, result: Dict[str, Any], num_entities: int) -> TimeSimulationConfig:
@@ -682,17 +678,17 @@ class SimulationConfigGenerator:
 
 ## 任务
 请生成事件配置JSON：
-- 提取热点话题关键词
-- 描述舆论发展方向
-- 设计初始帖子内容，**每个帖子必须指定 poster_type（发布者类型）**
+- 提取核心议题或热点关键词
+- 描述情景发展方向或公共叙事走向
+- 设计初始消息、声明或帖子内容，**每条都必须指定 poster_type（发布者类型）**
 
 **重要**: poster_type 必须从上面的"可用实体类型"中选择，这样初始帖子才能分配给合适的 Agent 发布。
-例如：官方声明应由 Official/University 类型发布，新闻由 MediaOutlet 发布，学生观点由 Student 发布。
+例如：官方声明应由 Official/University/GovernmentAgency 类型发布，新闻或公告由 MediaOutlet 或相近类型发布，个人观点由 Student/Person/Leader 等相近类型发布。
 
 返回JSON格式（不要markdown）：
 {{
     "hot_topics": ["关键词1", "关键词2", ...],
-    "narrative_direction": "<舆论发展方向描述>",
+    "narrative_direction": "<情景发展方向或公共叙事描述>",
     "initial_posts": [
         {{"content": "帖子内容", "poster_type": "实体类型（必须从可用类型中选择）"}},
         ...
@@ -700,7 +696,7 @@ class SimulationConfigGenerator:
     "reasoning": "<简要说明>"
 }}"""
 
-        system_prompt = "你是舆论分析专家。返回纯JSON格式。注意 poster_type 必须精确匹配可用实体类型。"
+        system_prompt = "你是情景事件设计专家。返回纯JSON格式。注意 poster_type 必须精确匹配可用实体类型，并与其身份定位一致。"
         
         try:
             return self._call_llm_with_retry(prompt, system_prompt)
@@ -827,7 +823,7 @@ class SimulationConfigGenerator:
                 "summary": e.summary[:summary_len] if e.summary else ""
             })
         
-        prompt = f"""基于以下信息，为每个实体生成社交媒体活动配置。
+        prompt = f"""基于以下信息，为每个实体生成公开行为活动配置。
 
 模拟需求: {simulation_requirement}
 
@@ -838,11 +834,12 @@ class SimulationConfigGenerator:
 
 ## 任务
 为每个实体生成活动配置，注意：
-- **时间符合中国人作息**：凌晨0-5点几乎不活动，晚间19-22点最活跃
-- **官方机构**（University/GovernmentAgency）：活跃度低(0.1-0.3)，工作时间(9-17)活动，响应慢(60-240分钟)，影响力高(2.5-3.0)
-- **媒体**（MediaOutlet）：活跃度中(0.4-0.6)，全天活动(8-23)，响应快(5-30分钟)，影响力高(2.0-2.5)
-- **个人**（Student/Person/Alumni）：活跃度高(0.6-0.9)，主要晚间活动(18-23)，响应快(1-15分钟)，影响力低(0.8-1.2)
-- **公众人物/专家**：活跃度中(0.4-0.6)，影响力中高(1.5-2.0)
+- **优先遵循世界观与身份逻辑**：如果给定设定中存在明确作息、制度、宗教节律、战争状态或种族特征，应优先服从这些规则
+- **若信息不足，可使用通用昼夜模式**：凌晨0-5点低活跃，晚间19-22点相对高活跃
+- **机构/官方角色**（如 University/GovernmentAgency/Organization）：活跃度偏低，表达克制，响应较慢，但影响力较高
+- **媒体/公告/传令渠道**（如 MediaOutlet）：活跃度中高，覆盖时段较广，响应较快，影响力较高
+- **个人角色**（如 Student/Person/Alumni）：活跃度中高，但必须结合身份、阶层、职责和世界规则调整
+- **领导者/专家/代表人物**：活跃度中等，影响力中高，表达更具立场和代表性
 
 返回JSON格式（不要markdown）：
 {{
@@ -852,7 +849,7 @@ class SimulationConfigGenerator:
             "activity_level": <0.0-1.0>,
             "posts_per_hour": <发帖频率>,
             "comments_per_hour": <评论频率>,
-            "active_hours": [<活跃小时列表，考虑中国人作息>],
+            "active_hours": [<活跃小时列表，结合世界规则与身份作息>],
             "response_delay_min": <最小响应延迟分钟>,
             "response_delay_max": <最大响应延迟分钟>,
             "sentiment_bias": <-1.0到1.0>,
@@ -863,7 +860,7 @@ class SimulationConfigGenerator:
     ]
 }}"""
 
-        system_prompt = "你是社交媒体行为分析专家。返回纯JSON，配置需符合中国人作息习惯。"
+        system_prompt = "你是情景推演中的角色行为配置专家。返回纯JSON，优先服从世界观、身份与制度约束；信息不足时再使用通用昼夜节律。"
         
         try:
             result = self._call_llm_with_retry(prompt, system_prompt)
@@ -902,7 +899,7 @@ class SimulationConfigGenerator:
         return configs
     
     def _generate_agent_config_by_rule(self, entity: EntityNode) -> Dict[str, Any]:
-        """基于规则生成单个Agent配置（中国人作息）"""
+        """基于规则生成单个Agent配置（通用活动节律）"""
         entity_type = (entity.get_entity_type() or "Unknown").lower()
         
         if entity_type in ["university", "governmentagency", "ngo"]:
