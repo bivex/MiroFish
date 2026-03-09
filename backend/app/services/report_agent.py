@@ -1130,6 +1130,86 @@ class ReportAgent:
             if params_desc:
                 desc_parts.append(f"  参数: {params_desc}")
         return "\n".join(desc_parts)
+
+    def _should_use_native_tools(self) -> bool:
+        checker = getattr(self.llm, "prefers_native_tools", None)
+        return bool(checker()) if callable(checker) else False
+
+    def _get_native_llm_tools(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "insight_forge",
+                    "description": TOOL_DESC_INSIGHT_FORGE,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "你想深入分析的问题或话题"},
+                            "report_context": {"type": "string", "description": "当前报告章节的上下文"},
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "panorama_search",
+                    "description": TOOL_DESC_PANORAMA_SEARCH,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "搜索查询，用于相关性排序"},
+                            "include_expired": {"type": "boolean", "description": "是否包含过期/历史内容"},
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "quick_search",
+                    "description": TOOL_DESC_QUICK_SEARCH,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "搜索查询字符串"},
+                            "limit": {"type": "integer", "description": "返回结果数量"},
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "interview_agents",
+                    "description": TOOL_DESC_INTERVIEW_AGENTS,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "interview_topic": {"type": "string", "description": "采访主题或需求描述"},
+                            "max_agents": {"type": "integer", "description": "最多采访的Agent数量"},
+                        },
+                        "required": ["interview_topic"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ]
+
+    def _get_llm_tool_kwargs(self) -> Dict[str, Any]:
+        if not self._should_use_native_tools():
+            return {}
+        return {
+            "tools": self._get_native_llm_tools(),
+            "tool_choice": "auto",
+        }
     
     def plan_outline(
         self, 
@@ -1288,6 +1368,7 @@ class ReportAgent:
 
         # 报告上下文，用于InsightForge的子问题生成
         report_context = f"章节标题: {section.title}\n模拟需求: {self.simulation_requirement}"
+        llm_tool_kwargs = self._get_llm_tool_kwargs()
         
         for iteration in range(max_iterations):
             if progress_callback:
@@ -1301,7 +1382,8 @@ class ReportAgent:
             response = self.llm.chat(
                 messages=messages,
                 temperature=0.5,
-                max_tokens=4096
+                max_tokens=4096,
+                **llm_tool_kwargs,
             )
 
             # 检查 LLM 返回是否为 None（API 异常或内容为空）
@@ -1820,11 +1902,13 @@ class ReportAgent:
         # ReACT循环（简化版）
         tool_calls_made = []
         max_iterations = 2  # 减少迭代轮数
+        llm_tool_kwargs = self._get_llm_tool_kwargs()
         
         for iteration in range(max_iterations):
             response = self.llm.chat(
                 messages=messages,
-                temperature=0.5
+                temperature=0.5,
+                **llm_tool_kwargs,
             )
             
             # 解析工具调用

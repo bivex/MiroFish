@@ -58,3 +58,28 @@ def test_cognee_entity_reader_filters_and_enriches_entities():
     assert result.entities[0].name == "Alice"
     assert result.entities[0].related_edges[0]["edge_name"] == "MEMBER_OF"
     assert result.entities[0].related_nodes[0]["name"] == "Guild"
+
+
+class ProjectionBuilderStub:
+    def get_graph_data(self, graph_id):
+        return {
+            "graph_id": graph_id,
+            "nodes": [
+                {"uuid": "n1", "name": "Aria", "labels": ["Entity", "Entity", "Actor"], "summary": "Captain", "attributes": {"type": "Actor", "semantic_type": "Actor"}},
+                {"uuid": "n2", "name": "Harbor Guild", "labels": ["Entity", "Entity", "Organization"], "summary": "Guild", "attributes": {"type": "Organization", "semantic_type": "Organization"}},
+            ],
+            "edges": [],
+        }
+
+
+def test_cognee_entity_reader_filters_projection_types():
+    module = load_entity_reader_module()
+    reader = module.CogneeEntityReader(builder=ProjectionBuilderStub())
+    result = reader.filter_defined_entities(
+        "graph_1",
+        defined_entity_types=["Actor", "Organization"],
+        enrich_with_edges=False,
+    )
+
+    assert result.filtered_count == 2
+    assert result.entity_types == {"Actor", "Organization"}

@@ -57,3 +57,45 @@ def test_cognee_builder_wait_for_episodes_is_compatible_noop():
     builder._wait_for_episodes(["graph_1"], lambda msg, progress: progress_updates.append((msg, progress)))
 
     assert progress_updates == [("Cognee 数据已同步，无需额外等待", 1.0)]
+
+
+def test_cognee_builder_applies_projection_semantic_types(tmp_path):
+    module = load_builder_module()
+
+    class SidecarStub:
+        def __init__(self, root):
+            self.root = root
+
+        def ensure_workspace(self, graph_id):
+            workspace = self.root / graph_id
+            workspace.mkdir(parents=True, exist_ok=True)
+            return workspace
+
+    builder = module.CogneeGraphBuilderService(sidecar_client=SidecarStub(tmp_path))
+    builder._persist_projection_semantic_types(
+        "graph_1",
+        [
+            "## Actors\nActor: Aria the Captain\n",
+            "## Organizations\nOrganization: Harbor Guild\n",
+        ],
+    )
+
+    graph_data = builder._format_graph_data(
+        "graph_1",
+        {
+            "graph_id": "graph_1",
+            "nodes": [
+                {"uuid": "n1", "name": "aria the captain", "labels": ["Entity", "Entity"], "summary": "Captain", "attributes": {"type": "Entity"}},
+                {"uuid": "n2", "name": "harbor guild", "labels": ["Entity", "Entity"], "summary": "Guild", "attributes": {"type": "Entity"}},
+            ],
+            "edges": [],
+        },
+    )
+
+    labels_by_name = {node["name"]: node["labels"] for node in graph_data["nodes"]}
+    attrs_by_name = {node["name"]: node["attributes"] for node in graph_data["nodes"]}
+
+    assert "Actor" in labels_by_name["aria the captain"]
+    assert "Organization" in labels_by_name["harbor guild"]
+    assert attrs_by_name["aria the captain"]["semantic_type"] == "Actor"
+    assert attrs_by_name["harbor guild"]["type"] == "Organization"

@@ -31,13 +31,51 @@ class LLMClient:
             api_key=self.api_key,
             base_url=self.base_url
         )
+
+    def prefers_native_tools(self) -> bool:
+        """是否优先使用原生 tool-calling（当前主要用于 Groq 兼容）。"""
+        return "groq.com" in (self.base_url or "").lower()
+
+    def _strip_think_blocks(self, content: Any) -> str:
+        text = content if isinstance(content, str) else ""
+        return re.sub(r'<think>[\s\S]*?</think>', '', text).strip()
+
+    def _parse_tool_arguments(self, arguments: Any) -> Dict[str, Any]:
+        if isinstance(arguments, dict):
+            return arguments
+        if not isinstance(arguments, str) or not arguments.strip():
+            return {}
+        try:
+            parsed = json.loads(arguments)
+        except json.JSONDecodeError:
+            return {"raw_arguments": arguments}
+        return parsed if isinstance(parsed, dict) else {"value": parsed}
+
+    def _format_native_tool_calls(self, tool_calls: Any) -> str:
+        if not tool_calls:
+            return ""
+
+        chunks = []
+        for call in tool_calls:
+            function = getattr(call, "function", None)
+            tool_name = getattr(function, "name", None)
+            if not tool_name:
+                continue
+            payload = {
+                "name": tool_name,
+                "parameters": self._parse_tool_arguments(getattr(function, "arguments", None)),
+            }
+            chunks.append(f"<tool_call>\n{json.dumps(payload, ensure_ascii=False)}\n</tool_call>")
+        return "\n\n".join(chunks)
     
     def chat(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        response_format: Optional[Dict] = None
+        response_format: Optional[Dict] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
     ) -> str:
         """
         发送聊天请求
@@ -60,11 +98,17 @@ class LLMClient:
         
         if response_format:
             kwargs["response_format"] = response_format
+        if tools:
+            kwargs["tools"] = tools
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
         
         response = self.client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content
-        # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除
-        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+        message = response.choices[0].message
+        content = self._strip_think_blocks(getattr(message, "content", None))
+        native_tool_text = self._format_native_tool_calls(getattr(message, "tool_calls", None))
+        if native_tool_text:
+            return "\n\n".join(part for part in [content, native_tool_text] if part)
         return content
     
     def chat_json(

@@ -96,12 +96,33 @@ class CogneeToolsService:
         self.entity_reader = entity_reader or CogneeEntityReader()
 
     def search_graph(self, graph_id: str, query: str, limit: int = 10, scope: str = "edges") -> SearchResult:
-        search_data = self.sidecar.search_graph(graph_id, query, limit)
         graph_data = self.sidecar.get_graph_data(graph_id)
         lowered = query.lower()
         nodes = [node for node in graph_data.get("nodes", []) if lowered in json.dumps(node, ensure_ascii=False).lower()][:limit]
         edges = [edge for edge in graph_data.get("edges", []) if lowered in json.dumps(edge, ensure_ascii=False).lower()][:limit]
-        facts = [str(item.get("search_result")) for item in search_data.get("results", [])[:limit]]
+        try:
+            search_data = self.sidecar.search_graph(graph_id, query, limit)
+            raw_results = search_data.get("results") or []
+        except Exception:
+            raw_results = []
+
+        facts = [
+            str(item.get("search_result"))
+            for item in raw_results[:limit]
+            if isinstance(item, dict) and item.get("search_result") is not None
+        ]
+        if not facts:
+            facts = [
+                edge.get("fact") or edge.get("name") or edge.get("uuid")
+                for edge in edges
+                if edge.get("fact") or edge.get("name") or edge.get("uuid")
+            ][:limit]
+        if not facts:
+            facts = [
+                node.get("summary") or node.get("name") or node.get("uuid")
+                for node in nodes
+                if node.get("summary") or node.get("name") or node.get("uuid")
+            ][:limit]
         return SearchResult(facts=facts, edges=edges, nodes=nodes, query=query, total_count=len(facts))
 
     def quick_search(self, graph_id: str, query: str, limit: int = 10) -> SearchResult:
@@ -125,15 +146,51 @@ class CogneeToolsService:
     def get_graph_statistics(self, graph_id: str) -> Dict[str, Any]:
         graph_data = self.sidecar.get_graph_data(graph_id)
         entity_type_counts: Dict[str, int] = {}
+        relation_type_counts: Dict[str, int] = {}
         for node in graph_data.get("nodes", []):
             for label in node.get("labels", []):
                 if label not in {"Entity", "Node"}:
                     entity_type_counts[label] = entity_type_counts.get(label, 0) + 1
+        for edge in graph_data.get("edges", []):
+            relation = edge.get("name") or edge.get("edge_name") or "related_to"
+            relation_type_counts[relation] = relation_type_counts.get(relation, 0) + 1
         return {
             "graph_id": graph_id,
             "node_count": len(graph_data.get("nodes", [])),
             "edge_count": len(graph_data.get("edges", [])),
             "entity_type_counts": entity_type_counts,
+            "relation_type_counts": relation_type_counts,
+            "total_nodes": len(graph_data.get("nodes", [])),
+            "total_edges": len(graph_data.get("edges", [])),
+            "entity_types": entity_type_counts,
+            "relation_types": relation_type_counts,
+        }
+
+    def get_simulation_context(self, graph_id: str, simulation_requirement: str, limit: int = 30) -> Dict[str, Any]:
+        graph_data = self.sidecar.get_graph_data(graph_id)
+        stats = self.get_graph_statistics(graph_id)
+        search_result = self.search_graph(graph_id=graph_id, query=simulation_requirement, limit=limit)
+
+        entities = []
+        for node in graph_data.get("nodes", []):
+            labels = [label for label in node.get("labels", []) if label not in {"Entity", "Node"}]
+            entity_type = labels[0] if labels else (node.get("attributes") or {}).get("type")
+            if not entity_type:
+                continue
+            entities.append(
+                {
+                    "name": node.get("name", ""),
+                    "type": entity_type,
+                    "summary": node.get("summary", ""),
+                }
+            )
+
+        return {
+            "simulation_requirement": simulation_requirement,
+            "related_facts": search_result.facts,
+            "graph_statistics": stats,
+            "entities": entities[:limit],
+            "total_entities": len(entities),
         }
 
     def panorama_search(self, graph_id: str, query: str, include_expired: bool = True, limit: int = 50) -> PanoramaResult:
