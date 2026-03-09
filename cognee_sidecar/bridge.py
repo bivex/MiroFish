@@ -69,10 +69,39 @@ def normalize_edge(raw: Any) -> dict[str, Any]:
     props: dict[str, Any] = {}
 
     if isinstance(raw, (list, tuple)) and len(raw) >= 4:
-        source = str(raw[0])
-        relation = str(raw[1])
-        target = str(raw[2])
         props = raw[3] or {}
+
+        source = str(raw[0])
+        second = str(raw[1])
+        third = str(raw[2])
+
+        relation_hint = str(
+            props.get("relationship_name")
+            or props.get("relationship_type")
+            or props.get("relation_type")
+            or props.get("relationship")
+            or ""
+        )
+        target_hint = str(
+            props.get("target_node_uuid")
+            or props.get("target_node_id")
+            or props.get("target_id")
+            or ""
+        )
+
+        if relation_hint and relation_hint == second and relation_hint != third:
+            relation = second
+            target = target_hint or third
+        elif relation_hint and relation_hint == third:
+            target = target_hint or second
+            relation = third
+        elif target_hint and target_hint == third and third != second:
+            relation = second
+            target = third
+        else:
+            # Cognee graph tuples arrive as: (source_node_id, target_node_id, relationship_name, props)
+            target = second
+            relation = third
     elif isinstance(raw, dict):
         source = str(
             raw.get("source")

@@ -33,6 +33,56 @@ def test_fetch_graph_data_awaits_async_graph_engine():
     assert edges == [{"id": "e1"}]
 
 
+def test_normalize_edge_supports_cognee_tuple_order():
+    module = load_bridge_module()
+
+    normalized = module.normalize_edge(
+        (
+            "node-source",
+            "node-target",
+            "contains",
+            {
+                "id": "edge-1",
+                "relationship_name": "contains",
+                "target_node_id": "node-target",
+            },
+        )
+    )
+
+    assert normalized == {
+        "uuid": "edge-1",
+        "name": "contains",
+        "fact": "contains",
+        "source_node_uuid": "node-source",
+        "target_node_uuid": "node-target",
+        "attributes": {
+            "id": "edge-1",
+            "relationship_name": "contains",
+            "target_node_id": "node-target",
+        },
+    }
+
+
+def test_normalize_edge_keeps_legacy_tuple_order_when_relation_is_second():
+    module = load_bridge_module()
+
+    normalized = module.normalize_edge(
+        (
+            "node-source",
+            "related_to",
+            "node-target",
+            {
+                "id": "edge-legacy",
+                "relationship_name": "related_to",
+            },
+        )
+    )
+
+    assert normalized["source_node_uuid"] == "node-source"
+    assert normalized["target_node_uuid"] == "node-target"
+    assert normalized["name"] == "related_to"
+
+
 def test_resolve_groq_provider_from_endpoint_and_normalize_model():
     module = load_bridge_module()
 
