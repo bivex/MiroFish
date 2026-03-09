@@ -15,6 +15,7 @@ OASIS Twitter模拟预设脚本
 
 import argparse
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -423,6 +424,169 @@ class TwitterSimulationRunner:
     def _get_db_path(self) -> str:
         """获取数据库路径"""
         return os.path.join(self.simulation_dir, "twitter_simulation.db")
+
+    def _get_actions_log_path(self) -> str:
+        """获取供 SimulationRunner 读取的 Twitter 动作日志路径。"""
+        return os.path.join(self.simulation_dir, "twitter", "actions.jsonl")
+
+    def _append_actions_log_entry(self, payload: Dict[str, Any]) -> None:
+        """追加一条动作/事件记录到 actions.jsonl。"""
+        actions_log = self._get_actions_log_path()
+        os.makedirs(os.path.dirname(actions_log), exist_ok=True)
+        with open(actions_log, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _append_platform_event(self, event_type: str, **payload: Any) -> None:
+        """写入平台事件（round_end / simulation_end 等）。"""
+        self._append_actions_log_entry({
+            "event_type": event_type,
+            "platform": "twitter",
+            "timestamp": datetime.now().isoformat(),
+            **payload,
+        })
+
+    def _get_latest_trace_rowid(self) -> int:
+        """获取 trace 表中当前最大的 rowid。"""
+        db_path = self._get_db_path()
+        if not os.path.exists(db_path):
+            return 0
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(MAX(rowid), 0) FROM trace")
+            row = cursor.fetchone()
+            conn.close()
+            return int(row[0] or 0) if row else 0
+        except Exception:
+            return 0
+
+    def _load_agent_names(self) -> Dict[int, str]:
+        """从 user 表加载 agent_id -> name 映射。"""
+        db_path = self._get_db_path()
+        if not os.path.exists(db_path):
+            return {}
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id, COALESCE(user_name, name, '') FROM user")
+            rows = cursor.fetchall()
+            conn.close()
+            return {int(user_id): str(name or "") for user_id, name in rows}
+        except Exception:
+            return {}
+
+    def _export_new_trace_actions(
+        self,
+        since_rowid: int,
+        round_num: int,
+        agent_names: Dict[int, str],
+    ) -> tuple[int, int]:
+        """将 trace 表中新产生的 Agent 动作导出为 SimulationRunner 兼容的 JSONL。"""
+        db_path = self._get_db_path()
+        if not os.path.exists(db_path):
+            return since_rowid, 0
+
+        exported = 0
+        last_rowid = since_rowid
+        skipped_actions = {"sign_up", "refresh"}
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT rowid, user_id, created_at, action, info
+                FROM trace
+                WHERE rowid > ?
+                ORDER BY rowid ASC
+                """,
+                (since_rowid,),
+            )
+            rows = cursor.fetchall()
+            conn.close()
+        except Exception as e:
+            print(f"  警告: 导出 trace 动作失败: {e}")
+            return since_rowid, 0
+
+        for rowid, user_id, created_at, action, info_json in rows:
+            last_rowid = max(last_rowid, int(rowid or 0))
+            if action in skipped_actions:
+                continue
+
+            try:
+                action_args = json.loads(info_json) if info_json else {}
+            except json.JSONDecodeError:
+                action_args = {"raw": info_json}
+
+            self._append_actions_log_entry({
+                "round": round_num,
+                "timestamp": datetime.now().isoformat(),
+                "platform": "twitter",
+                "agent_id": int(user_id or 0),
+                "agent_name": agent_names.get(int(user_id or 0), ""),
+                "action_type": action,
+                "action_args": action_args if isinstance(action_args, dict) else {"value": action_args},
+                "result": {"trace_created_at": created_at},
+                "success": True,
+            })
+            exported += 1
+
+        return last_rowid, exported
+
+    @staticmethod
+    def _sanitize_tool_schema(tool) -> bool:
+        """Patch zero-arg tool schemas that Groq rejects when required=[] is present."""
+        func = getattr(tool, "func", None)
+        if getattr(func, "__name__", "") != "do_nothing":
+            return False
+
+        try:
+            schema = copy.deepcopy(tool.get_openai_tool_schema())
+        except Exception:
+            return False
+
+        function_schema = schema.get("function") or {}
+        parameters = function_schema.get("parameters") or {}
+        if not isinstance(parameters, dict):
+            return False
+
+        if parameters.get("properties") != {} or parameters.get("required") != []:
+            return False
+
+        sanitized_parameters = dict(parameters)
+        sanitized_parameters.setdefault("properties", {})
+        sanitized_parameters.pop("required", None)
+        sanitized_schema = dict(schema)
+        sanitized_schema["function"] = {
+            **function_schema,
+            "parameters": sanitized_parameters,
+        }
+        tool.get_openai_tool_schema = (
+            lambda _schema=copy.deepcopy(sanitized_schema): copy.deepcopy(_schema)
+        )
+        return True
+
+    def _sanitize_agent_tool_schemas(self) -> int:
+        """Normalize tool schemas for all generated agents before env.step() calls."""
+        if self.agent_graph is None:
+            return 0
+
+        patched = 0
+        seen_tools = set()
+        for _agent_id, agent in self.agent_graph.get_agents():
+            tool_candidates = list(getattr(agent, "action_tools", []) or [])
+            tool_candidates.extend((getattr(agent, "_internal_tools", {}) or {}).values())
+            for tool in tool_candidates:
+                tool_id = id(tool)
+                if tool_id in seen_tools:
+                    continue
+                seen_tools.add(tool_id)
+                if self._sanitize_tool_schema(tool):
+                    patched += 1
+
+        return patched
     
     def _create_model(self):
         """
@@ -527,6 +691,21 @@ class TwitterSimulationRunner:
                 pass
         
         return active_agents
+
+    async def _publish_initial_posts(self, initial_posts: List[Dict[str, Any]]) -> int:
+        """Publish seed posts directly to the platform before the first env.step."""
+        published_count = 0
+        for post in initial_posts:
+            agent_id = post.get("poster_agent_id", 0)
+            content = (post.get("content") or "").strip()
+            if not content:
+                continue
+            try:
+                await self.env.platform.create_post(agent_id, content)
+                published_count += 1
+            except Exception as e:
+                print(f"  警告: 无法为Agent {agent_id}创建初始帖子: {e}")
+        return published_count
     
     async def run(self, max_rounds: int = None):
         """运行Twitter模拟
@@ -580,6 +759,9 @@ class TwitterSimulationRunner:
             model=model,
             available_actions=self.AVAILABLE_ACTIONS,
         )
+        patched_tools = self._sanitize_agent_tool_schemas()
+        if patched_tools:
+            print(f"已修正 {patched_tools} 个 zero-arg tool schema（兼容 Groq tool calling）")
         
         # 数据库路径
         db_path = self._get_db_path()
@@ -598,6 +780,14 @@ class TwitterSimulationRunner:
         
         await self.env.reset()
         print("环境初始化完成\n")
+
+        # 重置供 SimulationRunner 读取的动作日志，并跳过 reset 阶段写入的 signup trace
+        actions_log = self._get_actions_log_path()
+        if os.path.exists(actions_log):
+            os.remove(actions_log)
+        trace_rowid = self._get_latest_trace_rowid()
+        agent_names = self._load_agent_names()
+        exported_actions_total = 0
         
         # 初始化IPC处理器
         self.ipc_handler = IPCHandler(self.simulation_dir, self.env, self.agent_graph)
@@ -609,22 +799,17 @@ class TwitterSimulationRunner:
         
         if initial_posts:
             print(f"执行初始事件 ({len(initial_posts)}条初始帖子)...")
-            initial_actions = {}
-            for post in initial_posts:
-                agent_id = post.get("poster_agent_id", 0)
-                content = post.get("content", "")
-                try:
-                    agent = self.env.agent_graph.get_agent(agent_id)
-                    initial_actions[agent] = ManualAction(
-                        action_type=ActionType.CREATE_POST,
-                        action_args={"content": content}
-                    )
-                except Exception as e:
-                    print(f"  警告: 无法为Agent {agent_id}创建初始帖子: {e}")
-            
-            if initial_actions:
-                await self.env.step(initial_actions)
-                print(f"  已发布 {len(initial_actions)} 条初始帖子")
+            published_count = await self._publish_initial_posts(initial_posts)
+            if published_count:
+                print(f"  已发布 {published_count} 条初始帖子")
+            # 初始帖子属于种子事件，不计入 runtime action history
+            trace_rowid = self._get_latest_trace_rowid()
+
+        self._append_platform_event(
+            "simulation_start",
+            total_rounds=total_rounds,
+            minutes_per_round=minutes_per_round,
+        )
         
         # 主模拟循环
         print("\n开始模拟循环...")
@@ -642,6 +827,13 @@ class TwitterSimulationRunner:
             )
             
             if not active_agents:
+                self._append_platform_event(
+                    "round_end",
+                    round=round_num + 1,
+                    simulated_hours=((round_num + 1) * minutes_per_round) / 60,
+                    active_agents=0,
+                    exported_actions=0,
+                )
                 continue
             
             # 构建动作
@@ -652,6 +844,20 @@ class TwitterSimulationRunner:
             
             # 执行动作
             await self.env.step(actions)
+
+            trace_rowid, exported_count = self._export_new_trace_actions(
+                trace_rowid,
+                round_num + 1,
+                agent_names,
+            )
+            exported_actions_total += exported_count
+            self._append_platform_event(
+                "round_end",
+                round=round_num + 1,
+                simulated_hours=((round_num + 1) * minutes_per_round) / 60,
+                active_agents=len(active_agents),
+                exported_actions=exported_count,
+            )
             
             # 打印进度
             if (round_num + 1) % 10 == 0 or round_num == 0:
@@ -663,6 +869,12 @@ class TwitterSimulationRunner:
                       f"- elapsed: {elapsed:.1f}s")
         
         total_elapsed = (datetime.now() - start_time).total_seconds()
+        self._append_platform_event(
+            "simulation_end",
+            total_rounds=total_rounds,
+            total_actions=exported_actions_total,
+            total_elapsed_seconds=total_elapsed,
+        )
         print(f"\n模拟循环完成!")
         print(f"  - 总耗时: {total_elapsed:.1f}秒")
         print(f"  - 数据库: {db_path}")

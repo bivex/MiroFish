@@ -222,6 +222,7 @@ class SimulationRunner:
     _monitor_threads: Dict[str, threading.Thread] = {}
     _stdout_files: Dict[str, Any] = {}  # 存储 stdout 文件句柄
     _stderr_files: Dict[str, Any] = {}  # 存储 stderr 文件句柄
+    _expected_process_exits: Dict[str, str] = {}  # simulation_id -> reason
     
     # 图谱记忆更新配置
     _graph_memory_enabled: Dict[str, bool] = {}  # simulation_id -> enabled
@@ -236,12 +237,353 @@ class SimulationRunner:
     def get_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
         """获取运行状态"""
         if simulation_id in cls._run_states:
-            return cls._run_states[simulation_id]
+            return cls._reconcile_stale_run_state(cls._run_states[simulation_id])
         
         # 尝试从文件加载
         state = cls._load_run_state(simulation_id)
         if state:
+            state = cls._reconcile_stale_run_state(state)
             cls._run_states[simulation_id] = state
+        return state
+
+    @classmethod
+    def _is_pid_alive(cls, pid: Optional[int]) -> bool:
+        """检查 PID 对应的进程是否仍然存活。"""
+        if not pid:
+            return False
+
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
+    @classmethod
+    def _get_pid_command(cls, pid: Optional[int]) -> str:
+        """读取进程命令行，用于识别重启后遗留的 orphaned simulation process。"""
+        if not pid:
+            return ""
+
+        if IS_WINDOWS:
+            return ""
+
+        try:
+            return subprocess.check_output(
+                ["ps", "-p", str(pid), "-o", "command="],
+                text=True,
+            ).strip()
+        except Exception:
+            return ""
+
+    @classmethod
+    def _pid_matches_simulation_process(cls, pid: Optional[int], simulation_id: str) -> bool:
+        """判断 PID 是否看起来像本系统启动的模拟子进程。"""
+        command = cls._get_pid_command(pid)
+        if not command:
+            return False
+
+        markers = [
+            simulation_id,
+            "run_twitter_simulation.py",
+            "run_reddit_simulation.py",
+            os.path.basename(cls.SCRIPTS_DIR),
+        ]
+        return any(marker in command for marker in markers)
+
+    @classmethod
+    def _terminate_orphaned_process(cls, pid: Optional[int], simulation_id: str, timeout: int = 10) -> bool:
+        """终止 backend 重启后遗留、但已不受当前进程管理的模拟子进程。"""
+        if not pid or not cls._is_pid_alive(pid):
+            return True
+
+        try:
+            if IS_WINDOWS:
+                subprocess.run(
+                    ['taskkill', '/F', '/PID', str(pid), '/T'],
+                    capture_output=True,
+                    timeout=5,
+                )
+            else:
+                pgid = os.getpgid(pid)
+                logger.warning(f"终止 orphaned simulation process: {simulation_id}, pid={pid}, pgid={pgid}")
+                os.killpg(pgid, signal.SIGTERM)
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    if not cls._is_pid_alive(pid):
+                        return True
+                    time.sleep(0.2)
+                os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except Exception as e:
+            logger.warning(f"终止 orphaned simulation process 失败: {simulation_id}, pid={pid}, error={e}")
+
+        return not cls._is_pid_alive(pid)
+
+    @classmethod
+    def _sync_simulation_state_file(
+        cls,
+        simulation_id: str,
+        status: str,
+        error: Optional[str] = None,
+    ) -> None:
+        """同步更新 simulation state.json，避免历史记录长期停留在 running。"""
+        state_file = os.path.join(cls.RUN_STATE_DIR, simulation_id, "state.json")
+        if not os.path.exists(state_file):
+            return
+
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            data['status'] = status
+            data['updated_at'] = datetime.now().isoformat()
+            if error:
+                data['error'] = error
+
+            with open(state_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"同步 state.json 失败: {simulation_id}, error={e}")
+
+    @classmethod
+    def _cleanup_terminal_orphaned_process(
+        cls,
+        state: Optional[SimulationRunState],
+    ) -> Optional[SimulationRunState]:
+        """
+        清理已经处于终态、但进程仍然残留的模拟子进程。
+
+        典型场景：close-env 已将 env_status 写成 stopped，但 Python 子进程
+        仍未真正退出。此时如果再次 start，同一 simulation_dir 里可能出现
+        两个进程同时存活，进而导致 IPC/SQLite 异常。
+        """
+        if not state or not state.process_pid:
+            return state
+
+        tracked_process = cls._processes.get(state.simulation_id)
+        if tracked_process and tracked_process.poll() is None:
+            return state
+
+        pid_alive = cls._is_pid_alive(state.process_pid)
+        if not pid_alive:
+            state.process_pid = None
+            state.twitter_running = False
+            state.reddit_running = False
+            state.updated_at = datetime.now().isoformat()
+            cls._save_run_state(state)
+            return state
+
+        env_status = cls.get_env_status_detail(state.simulation_id)
+        if env_status.get("status") == "alive":
+            return state
+
+        if not cls._pid_matches_simulation_process(state.process_pid, state.simulation_id):
+            logger.warning(
+                f"检测到终态残留进程，但 PID 不匹配模拟命令，跳过自动清理: "
+                f"{state.simulation_id}, pid={state.process_pid}"
+            )
+            return state
+
+        terminated = cls._terminate_orphaned_process(state.process_pid, state.simulation_id)
+        if not terminated:
+            logger.warning(
+                f"检测到终态 orphaned simulation process，但终止失败: "
+                f"{state.simulation_id}, pid={state.process_pid}"
+            )
+            return state
+
+        logger.warning(
+            f"检测到终态 orphaned simulation process，已自动清理: "
+            f"{state.simulation_id}, pid={state.process_pid}"
+        )
+        state.process_pid = None
+        state.twitter_running = False
+        state.reddit_running = False
+        state.updated_at = datetime.now().isoformat()
+        cls._save_run_state(state)
+        return state
+
+    @classmethod
+    def _wait_for_env_shutdown(cls, simulation_id: str, timeout: float = 5.0) -> bool:
+        """等待 env_status 从 alive 变为非 alive。"""
+        deadline = time.time() + max(timeout, 0)
+        while time.time() < deadline:
+            if not cls.check_env_alive(simulation_id):
+                return True
+            time.sleep(0.2)
+        return not cls.check_env_alive(simulation_id)
+
+    @classmethod
+    def _finalize_process_after_env_close(cls, simulation_id: str) -> None:
+        """
+        close-env 后确保模拟主进程真正退出，避免残留进程污染后续 start/interview。
+        """
+        state = cls._load_run_state(simulation_id)
+        if not state or not state.process_pid:
+            return
+
+        tracked_process = cls._processes.get(simulation_id)
+        if tracked_process and tracked_process.poll() is None:
+            logger.warning(
+                f"close-env 后检测到主进程仍存活，执行进程清理: "
+                f"{simulation_id}, pid={tracked_process.pid}"
+            )
+            cls._expected_process_exits[simulation_id] = "close_env"
+            try:
+                cls._terminate_process(tracked_process, simulation_id, timeout=5)
+            except Exception as e:
+                logger.warning(f"close-env 后终止主进程失败，回退到 orphan 清理: {simulation_id}, error={e}")
+                cls._terminate_orphaned_process(state.process_pid, simulation_id, timeout=5)
+        else:
+            cls.get_run_state(simulation_id)
+
+        refreshed_state = cls._load_run_state(simulation_id)
+        if refreshed_state and refreshed_state.process_pid and not cls._is_pid_alive(refreshed_state.process_pid):
+            refreshed_state.process_pid = None
+            refreshed_state.twitter_running = False
+            refreshed_state.reddit_running = False
+            refreshed_state.updated_at = datetime.now().isoformat()
+            cls._save_run_state(refreshed_state)
+
+    @classmethod
+    def _reconcile_stale_run_state(
+        cls,
+        state: Optional[SimulationRunState],
+    ) -> Optional[SimulationRunState]:
+        """
+        修复 backend 重启后残留的 stale run_state。
+
+        如果 run_state.json 仍然显示 starting/running/stopping，但 process_pid
+        对应的进程已经不存在，则自动回收为终态，避免 API 长期误判为运行中。
+        """
+        if not state:
+            return None
+
+        if state.runner_status not in {
+            RunnerStatus.STARTING,
+            RunnerStatus.RUNNING,
+            RunnerStatus.STOPPING,
+        }:
+            return cls._cleanup_terminal_orphaned_process(state)
+
+        tracked_process = cls._processes.get(state.simulation_id)
+        if tracked_process and tracked_process.poll() is None:
+            return state
+
+        pid_alive = cls._is_pid_alive(state.process_pid)
+        if pid_alive:
+            if state.simulation_id not in cls._processes:
+                if cls._pid_matches_simulation_process(state.process_pid, state.simulation_id):
+                    terminated = cls._terminate_orphaned_process(state.process_pid, state.simulation_id)
+                    if not terminated:
+                        logger.warning(
+                            f"检测到 orphaned simulation process，但终止失败，暂不回收状态: "
+                            f"{state.simulation_id}, pid={state.process_pid}"
+                        )
+                        return state
+                else:
+                    logger.warning(
+                        f"检测到未被当前 backend 管理的运行状态，且 PID 不再匹配模拟命令，按 stale 回收: "
+                        f"{state.simulation_id}, pid={state.process_pid}"
+                    )
+            else:
+                return state
+
+        sim_dir = os.path.join(cls.RUN_STATE_DIR, state.simulation_id)
+        completion_flags: List[bool] = []
+        stale_error = f"检测到 stale run_state：进程 pid={state.process_pid} 已不存在"
+
+        for platform in ("twitter", "reddit"):
+            actions_file = os.path.join(sim_dir, platform, "actions.jsonl")
+            if not os.path.exists(actions_file):
+                continue
+
+            platform_actions = cls._read_actions_from_file(
+                actions_file,
+                default_platform=platform,
+            )
+            max_round_from_actions = max(
+                (action.round_num for action in platform_actions),
+                default=0,
+            )
+
+            if platform == "twitter":
+                state.twitter_actions_count = max(state.twitter_actions_count, len(platform_actions))
+                state.twitter_current_round = max(state.twitter_current_round, max_round_from_actions)
+            else:
+                state.reddit_actions_count = max(state.reddit_actions_count, len(platform_actions))
+                state.reddit_current_round = max(state.reddit_current_round, max_round_from_actions)
+
+            has_simulation_end = False
+            try:
+                with open(actions_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        try:
+                            payload = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        if payload.get("event_type") == "round_end":
+                            round_num = payload.get("round", 0) or 0
+                            simulated_hours = payload.get("simulated_hours", 0) or 0
+                            state.current_round = max(state.current_round, round_num)
+                            if platform == "twitter":
+                                state.twitter_current_round = max(state.twitter_current_round, round_num)
+                                state.twitter_simulated_hours = max(state.twitter_simulated_hours, simulated_hours)
+                            else:
+                                state.reddit_current_round = max(state.reddit_current_round, round_num)
+                                state.reddit_simulated_hours = max(state.reddit_simulated_hours, simulated_hours)
+
+                        if payload.get("event_type") == "simulation_end":
+                            has_simulation_end = True
+                            state.total_rounds = max(state.total_rounds, payload.get("total_rounds", 0) or 0)
+
+                if platform == "twitter":
+                    state.twitter_completed = has_simulation_end
+                else:
+                    state.reddit_completed = has_simulation_end
+            except Exception as e:
+                logger.warning(f"读取 stale actions.jsonl 失败: {actions_file}, error={e}")
+
+            completion_flags.append(has_simulation_end)
+
+        state.current_round = max(state.current_round, state.twitter_current_round, state.reddit_current_round)
+        state.simulated_hours = max(state.twitter_simulated_hours, state.reddit_simulated_hours)
+        state.twitter_running = False
+        state.reddit_running = False
+        state.process_pid = None
+        state.updated_at = datetime.now().isoformat()
+
+        if completion_flags and all(completion_flags):
+            state.runner_status = RunnerStatus.COMPLETED
+            state.error = None
+            sync_status = "completed"
+        else:
+            state.runner_status = RunnerStatus.STOPPED
+            state.error = state.error or stale_error
+            sync_status = "stopped"
+
+        if not state.completed_at:
+            state.completed_at = datetime.now().isoformat()
+
+        logger.warning(
+            f"检测到 stale run_state，已自动修复: {state.simulation_id}, status={sync_status}"
+        )
+        cls._save_run_state(state)
+        cls._sync_simulation_state_file(
+            simulation_id=state.simulation_id,
+            status=sync_status,
+            error=state.error,
+        )
         return state
     
     @classmethod
@@ -341,6 +683,15 @@ class SimulationRunner:
         existing = cls.get_run_state(simulation_id)
         if existing and existing.runner_status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]:
             raise ValueError(f"模拟已在运行中: {simulation_id}")
+        if existing and existing.process_pid:
+            tracked_process = cls._processes.get(simulation_id)
+            tracked_alive = tracked_process is not None and tracked_process.poll() is None
+            pid_alive = tracked_alive or cls._is_pid_alive(existing.process_pid)
+            if pid_alive and cls._pid_matches_simulation_process(existing.process_pid, simulation_id):
+                raise ValueError(
+                    f"模拟进程仍在运行或等待命令中: {simulation_id}. "
+                    f"请先调用 /close-env 关闭环境，或调用 /stop 强制终止后再重新启动。"
+                )
         
         # 加载模拟配置
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
@@ -529,10 +880,19 @@ class SimulationRunner:
             # 进程结束
             exit_code = process.returncode
             
+            shutdown_reason = cls._expected_process_exits.pop(simulation_id, None)
+
             if exit_code == 0:
                 state.runner_status = RunnerStatus.COMPLETED
                 state.completed_at = datetime.now().isoformat()
                 logger.info(f"模拟完成: {simulation_id}")
+            elif shutdown_reason == "close_env":
+                if state.runner_status == RunnerStatus.COMPLETED:
+                    logger.info(f"close-env 后模拟进程已退出: {simulation_id}")
+                else:
+                    state.runner_status = RunnerStatus.STOPPED
+                    state.completed_at = datetime.now().isoformat()
+                    logger.info(f"close-env 后模拟已停止: {simulation_id}")
             else:
                 state.runner_status = RunnerStatus.FAILED
                 # 从主日志文件读取错误信息
@@ -549,6 +909,7 @@ class SimulationRunner:
             
             state.twitter_running = False
             state.reddit_running = False
+            state.process_pid = None
             cls._save_run_state(state)
             
         except Exception as e:
@@ -1651,6 +2012,11 @@ class SimulationRunner:
         
         try:
             response = ipc_client.send_close_env(timeout=timeout)
+            shutdown_observed = cls._wait_for_env_shutdown(simulation_id, timeout=min(timeout, 5.0))
+            if shutdown_observed:
+                cls._finalize_process_after_env_close(simulation_id)
+            else:
+                cls.get_run_state(simulation_id)
             
             return {
                 "success": response.status.value == "completed",
@@ -1660,6 +2026,11 @@ class SimulationRunner:
             }
         except TimeoutError:
             # 超时可能是因为环境正在关闭
+            shutdown_observed = cls._wait_for_env_shutdown(simulation_id, timeout=min(timeout, 5.0))
+            if shutdown_observed:
+                cls._finalize_process_after_env_close(simulation_id)
+            else:
+                cls.get_run_state(simulation_id)
             return {
                 "success": True,
                 "message": "环境关闭命令已发送（等待响应超时，环境可能正在关闭）"
