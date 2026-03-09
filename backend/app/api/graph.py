@@ -160,6 +160,7 @@ def import_projection_bundle():
         project.total_text_length = len(extracted_text)
         project.ontology = adapted['ontology']
         project.analysis_summary = adapted['analysis_summary']
+        project.recommended_prepare_entity_types = adapted['recommended_prepare_entity_types']
         project.status = ProjectStatus.ONTOLOGY_GENERATED
 
         ProjectManager.save_extracted_text(project.project_id, extracted_text)

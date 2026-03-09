@@ -482,7 +482,8 @@ Use this tool when you need the richest evidence package for a report section. I
 [Returns]
 - relevant fact snippets you can cite directly
 - key entity insights
-- relationship chain analysis"""
+- relationship chain analysis
+- diagnostics about evidence sources and fallback mode"""
 
 TOOL_DESC_PANORAMA_SEARCH = """\
 [Panorama Search - broad situational view]
@@ -499,7 +500,8 @@ Use this tool to understand the full picture of a simulation outcome. It will:
 [Returns]
 - active facts from the latest simulation state
 - historical or expired facts from earlier stages
-- all involved entities"""
+- all involved entities
+- diagnostics about evidence sources and fallback mode"""
 
 TOOL_DESC_QUICK_SEARCH = """\
 [Quick Search - lightweight fact lookup]
@@ -511,7 +513,8 @@ A lightweight retrieval tool for simple and direct information checks.
 - lightweight evidence lookup
 
 [Returns]
-- a list of facts most relevant to the query"""
+- a list of facts most relevant to the query
+- diagnostics about evidence sources and fallback mode"""
 
 TOOL_DESC_INTERVIEW_AGENTS = """\
 [Agent Interviews - real first-person responses across platforms]
@@ -796,6 +799,7 @@ Observation (retrieved evidence):
 Tools used: {tool_calls_count}/{max_tool_calls} (used so far: {used_tools_str}){unused_hint}
 - If the evidence is sufficient, output the section with the prefix "Final Answer:"
 - If you still need evidence, call one more tool
+- Read any `diagnostics` fields carefully. If fallback was used or evidence is sparse, say that explicitly and do not overclaim.
 ═══════════════════════════════════════════════════════════════"""
 
 REACT_INSUFFICIENT_TOOLS_MSG = (
@@ -977,19 +981,197 @@ class ReportAgent:
         return tools
     
     def _execute_tool(self, tool_name: str, parameters: Dict[str, Any], report_context: str = "") -> str:
-        """
-        执行工具调用
-        
-        Args:
-            tool_name: 工具名称
-            parameters: 工具参数
-            report_context: 报告上下文（用于InsightForge）
-            
-        Returns:
-            工具执行结果（文本格式）
-        """
+        """执行工具调用并返回文本格式结果。"""
+        return self._execute_tool_payload(tool_name, parameters, report_context).get("text", "")
+
+    def _serialize_tool_result(self, result: Any) -> str:
+        """将工具结果稳定序列化为字符串。"""
+        if result is None:
+            return ""
+        to_text = getattr(result, "to_text", None)
+        if callable(to_text):
+            return to_text()
+        if isinstance(result, (dict, list)):
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        return str(result)
+
+    def _normalize_tool_fact(self, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    def _is_runtime_fact_like(self, fact: str) -> bool:
+        text = self._normalize_tool_fact(fact)
+        if not text:
+            return False
+
+        lowered = text.lower()
+        structural_markers = (
+            "source_id:",
+            "target_id:",
+            "canonical_id:",
+            "relation_type:",
+            "speaker_mode:",
+            "schema_version:",
+            "scenario_id:",
+            "world_id:",
+        )
+        if any(marker in lowered for marker in structural_markers):
+            return False
+
+        structural_prefixes = (
+            "socialedge:",
+            "worldrule:",
+            "contextlocation:",
+            "eventseed:",
+            "organization:",
+            "actor:",
+            "## ",
+        )
+        if lowered.startswith(structural_prefixes):
+            return False
+
+        if "[round" in lowered or "[twitter]" in lowered or "[reddit]" in lowered:
+            return True
+
+        runtime_tokens = (
+            " create_post",
+            " create_comment",
+            " quote_post",
+            " like_post",
+            " do_nothing",
+            " posted ",
+            " commented ",
+            " replied ",
+            " quoted ",
+            " reposted ",
+            " retweeted ",
+            " shared ",
+        )
+        return any(token in lowered for token in runtime_tokens)
+
+    def _extract_grounded_tool_lines(self, tool_name: str, result: Any) -> List[str]:
+        if tool_name == "insight_forge":
+            candidates = list(getattr(result, "semantic_facts", []) or []) + list(
+                getattr(result, "relationship_chains", []) or []
+            )
+        elif tool_name == "panorama_search":
+            candidates = list(getattr(result, "active_facts", []) or [])
+        elif tool_name == "quick_search":
+            candidates = list(getattr(result, "facts", []) or [])
+        else:
+            return []
+
+        grounded: List[str] = []
+        seen = set()
+        for item in candidates:
+            text = self._normalize_tool_fact(item)
+            if not text or text in seen or not self._is_runtime_fact_like(text):
+                continue
+            grounded.append(text)
+            seen.add(text)
+        return grounded
+
+    def _render_tool_result_for_llm(
+        self,
+        tool_name: str,
+        result: Any,
+        raw_text: str,
+        evidence_summary: Dict[str, Any],
+    ) -> str:
+        if self.graph_backend != "cognee" or tool_name not in {"insight_forge", "panorama_search", "quick_search"}:
+            return raw_text
+
+        grounded_lines = self._extract_grounded_tool_lines(tool_name, result)
+        if not grounded_lines:
+            return raw_text
+
+        evidence_sources = evidence_summary.get("evidence_sources") or []
+        lines = [f"Verified runtime evidence from {tool_name}:"]
+        if evidence_sources:
+            lines.append(f"Evidence sources: {', '.join(evidence_sources)}")
+        lines.append("Grounded facts:")
+        for line in grounded_lines[:8]:
+            lines.append(f"- {line}")
+        lines.append("Use only the grounded facts above for narrative synthesis.")
+        return "\n".join(lines)
+
+    def _build_tool_evidence_summary(self, tool_name: str, result: Any) -> Dict[str, Any]:
+        """为工具结果提取一个轻量 evidence summary，用于 section grounding guard。"""
+        diagnostics = getattr(result, "diagnostics", None)
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+
+        evidence_sources = [
+            str(source) for source in (diagnostics.get("evidence_sources") or []) if source
+        ]
+        summary: Dict[str, Any] = {
+            "tool_name": tool_name,
+            "evidence_sources": evidence_sources,
+            "meaningful": False,
+        }
+        grounded_lines = self._extract_grounded_tool_lines(tool_name, result)
+        summary["grounded_line_count"] = len(grounded_lines)
+
+        if tool_name == "insight_forge":
+            semantic_facts = list(getattr(result, "semantic_facts", []) or [])
+            entity_insights = list(getattr(result, "entity_insights", []) or [])
+            relationship_chains = list(getattr(result, "relationship_chains", []) or [])
+            summary.update({
+                "semantic_fact_count": len(semantic_facts),
+                "entity_count": len(entity_insights),
+                "relationship_chain_count": len(relationship_chains),
+            })
+            summary["meaningful"] = bool(grounded_lines) if self.graph_backend == "cognee" else bool(semantic_facts or relationship_chains)
+            return summary
+
+        if tool_name == "panorama_search":
+            active_facts = list(getattr(result, "active_facts", []) or [])
+            all_nodes = list(getattr(result, "all_nodes", []) or [])
+            all_edges = list(getattr(result, "all_edges", []) or [])
+            summary.update({
+                "active_fact_count": len(active_facts),
+                "node_count": len(all_nodes),
+                "edge_count": len(all_edges),
+            })
+            summary["meaningful"] = bool(grounded_lines) if self.graph_backend == "cognee" else bool(active_facts or all_edges)
+            return summary
+
+        if tool_name == "quick_search":
+            facts = list(getattr(result, "facts", []) or [])
+            nodes = list(getattr(result, "nodes", []) or [])
+            edges = list(getattr(result, "edges", []) or [])
+            summary.update({
+                "fact_count": len(facts),
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+                "total_count": getattr(result, "total_count", None),
+            })
+            summary["meaningful"] = bool(grounded_lines) if self.graph_backend == "cognee" else bool(facts or edges)
+            return summary
+
+        if tool_name == "interview_agents":
+            interviews = list(getattr(result, "interviews", []) or [])
+            summary["interview_count"] = len(interviews)
+            summary["meaningful"] = bool(interviews)
+            return summary
+
+        text = self._serialize_tool_result(result).strip()
+        summary["text_length"] = len(text)
+        summary["meaningful"] = bool(
+            text
+            and not text.startswith("Unknown tool:")
+            and not text.startswith("Tool execution failed:")
+        )
+        return summary
+
+    def _execute_tool_payload(
+        self,
+        tool_name: str,
+        parameters: Dict[str, Any],
+        report_context: str = "",
+    ) -> Dict[str, Any]:
+        """执行工具并返回文本结果和 evidence summary。"""
         logger.info(f"执行工具: {tool_name}, 参数: {parameters}")
-        
+
         try:
             if tool_name == "insight_forge":
                 query = parameters.get("query", "")
@@ -998,31 +1180,25 @@ class ReportAgent:
                     graph_id=self.graph_id,
                     query=query,
                     simulation_requirement=self.simulation_requirement,
-                    report_context=ctx
+                    report_context=ctx,
                 )
                 if self.graph_backend == "cognee":
                     kwargs["simulation_id"] = self.simulation_id
                 result = self.zep_tools.insight_forge(**kwargs)
-                return result.to_text()
-            
             elif tool_name == "panorama_search":
-                # 广度搜索 - 获取全貌
                 query = parameters.get("query", "")
                 include_expired = parameters.get("include_expired", True)
                 if isinstance(include_expired, str):
-                    include_expired = include_expired.lower() in ['true', '1', 'yes']
+                    include_expired = include_expired.lower() in ["true", "1", "yes"]
                 kwargs = dict(
                     graph_id=self.graph_id,
                     query=query,
-                    include_expired=include_expired
+                    include_expired=include_expired,
                 )
                 if self.graph_backend == "cognee":
                     kwargs["simulation_id"] = self.simulation_id
                 result = self.zep_tools.panorama_search(**kwargs)
-                return result.to_text()
-            
             elif tool_name == "quick_search":
-                # 简单搜索 - 快速检索
                 query = parameters.get("query", "")
                 limit = parameters.get("limit", 10)
                 if isinstance(limit, str):
@@ -1030,21 +1206,26 @@ class ReportAgent:
                 kwargs = dict(
                     graph_id=self.graph_id,
                     query=query,
-                    limit=limit
+                    limit=limit,
                 )
                 if self.graph_backend == "cognee":
                     kwargs["simulation_id"] = self.simulation_id
                 result = self.zep_tools.quick_search(**kwargs)
-                return result.to_text()
-            
             elif tool_name == "interview_agents":
                 if not self._supports_interview_agents():
-                    return json.dumps(
+                    text = json.dumps(
                         {"summary": "interview_agents is unavailable for the current graph backend."},
                         ensure_ascii=False,
                         indent=2,
                     )
-                # 深度采访 - 调用真实的OASIS采访API获取模拟Agent的回答（双平台）
+                    return {
+                        "text": text,
+                        "evidence": {
+                            "tool_name": tool_name,
+                            "evidence_sources": [],
+                            "meaningful": False,
+                        },
+                    }
                 interview_topic = parameters.get("interview_topic", parameters.get("query", ""))
                 max_agents = parameters.get("max_agents", 5)
                 if isinstance(max_agents, str):
@@ -1054,50 +1235,143 @@ class ReportAgent:
                     simulation_id=self.simulation_id,
                     interview_requirement=interview_topic,
                     simulation_requirement=self.simulation_requirement,
-                    max_agents=max_agents
+                    max_agents=max_agents,
                 )
-                return result.to_text()
-            
-            # ========== 向后兼容的旧工具（内部重定向到新工具） ==========
-            
             elif tool_name == "search_graph":
-                # 重定向到 quick_search
                 logger.info("search_graph 已重定向到 quick_search")
-                return self._execute_tool("quick_search", parameters, report_context)
-            
+                return self._execute_tool_payload("quick_search", parameters, report_context)
             elif tool_name == "get_graph_statistics":
                 result = self.zep_tools.get_graph_statistics(self.graph_id)
-                return json.dumps(result, ensure_ascii=False, indent=2)
-            
             elif tool_name == "get_entity_summary":
                 entity_name = parameters.get("entity_name", "")
                 result = self.zep_tools.get_entity_summary(
                     graph_id=self.graph_id,
-                    entity_name=entity_name
+                    entity_name=entity_name,
                 )
-                return json.dumps(result, ensure_ascii=False, indent=2)
-            
             elif tool_name == "get_simulation_context":
-                # 重定向到 insight_forge，因为它更强大
                 logger.info("get_simulation_context 已重定向到 insight_forge")
                 query = parameters.get("query", self.simulation_requirement)
-                return self._execute_tool("insight_forge", {"query": query}, report_context)
-            
+                return self._execute_tool_payload("insight_forge", {"query": query}, report_context)
             elif tool_name == "get_entities_by_type":
                 entity_type = parameters.get("entity_type", "")
                 nodes = self.zep_tools.get_entities_by_type(
                     graph_id=self.graph_id,
-                    entity_type=entity_type
+                    entity_type=entity_type,
                 )
                 result = [n.to_dict() for n in nodes]
-                return json.dumps(result, ensure_ascii=False, indent=2)
-            
             else:
-                return f"Unknown tool: {tool_name}. Use one of these tools instead: insight_forge, panorama_search, quick_search"
-                
+                text = (
+                    f"Unknown tool: {tool_name}. Use one of these tools instead: "
+                    "insight_forge, panorama_search, quick_search"
+                )
+                return {
+                    "text": text,
+                    "evidence": {
+                        "tool_name": tool_name,
+                        "evidence_sources": [],
+                        "meaningful": False,
+                    },
+                }
+
+            raw_text = self._serialize_tool_result(result)
+            evidence = self._build_tool_evidence_summary(tool_name, result)
+            return {
+                "text": self._render_tool_result_for_llm(tool_name, result, raw_text, evidence),
+                "log_text": raw_text,
+                "evidence": evidence,
+            }
         except Exception as e:
             logger.error(f"Tool execution failed: {tool_name}, error: {str(e)}")
-            return f"Tool execution failed: {str(e)}"
+            return {
+                "text": f"Tool execution failed: {str(e)}",
+                "log_text": f"Tool execution failed: {str(e)}",
+                "evidence": {
+                    "tool_name": tool_name,
+                    "evidence_sources": [],
+                    "meaningful": False,
+                    "error": str(e),
+                },
+            }
+
+    def _build_grounded_runtime_fallback(
+        self,
+        tool_evidence_records: List[Dict[str, Any]],
+    ) -> str:
+        """当图检索没有产出有效证据时，退化为只基于 runtime actions 的 grounded 文本。"""
+        runtime_evidence = self._get_runtime_evidence()
+        action_facts = [
+            str(item).strip() for item in (runtime_evidence.get("action_facts") or []) if str(item).strip()
+        ]
+        current_round = runtime_evidence.get("current_round", 0)
+        total_actions = runtime_evidence.get("total_actions", 0)
+
+        lines = [
+            "Grounded evidence for this part of the report is limited because graph retrieval returned sparse results. The notes below rely only on verified runtime actions from the simulation trace.",
+        ]
+
+        if current_round or total_actions:
+            lines.append(
+                f"Verified runtime scope: round {current_round} observed with {total_actions} total actions recorded so far."
+            )
+
+        if action_facts:
+            lines.append("")
+            lines.append("Verified observations:")
+            for fact in action_facts[:6]:
+                lines.append(f"- {fact}")
+            lines.append("")
+            lines.append(
+                "A stronger synthesis should be generated only after graph tools return non-empty facts, relationships, or search matches."
+            )
+            return "\n".join(lines).strip()
+
+        lines.append(
+            "The current trace does not expose enough verified action-level evidence to support a reliable analytical narrative yet. Please retry after more runtime evidence is available."
+        )
+        if tool_evidence_records:
+            sparse_tools = ", ".join(record.get("tool_name", "unknown") for record in tool_evidence_records)
+            lines.append(f"Sparse tool calls observed: {sparse_tools}.")
+        return "\n".join(lines).strip()
+
+    def _finalize_section_output(
+        self,
+        section: "ReportSection",
+        section_index: int,
+        content: str,
+        tool_calls_count: int,
+        tool_evidence_records: List[Dict[str, Any]],
+    ) -> str:
+        """在写入章节前做最后一道 grounding 检查。"""
+        final_answer = (content or "").strip()
+        meaningful_evidence = any(record.get("meaningful") for record in tool_evidence_records)
+
+        if not meaningful_evidence:
+            logger.warning(
+                f"章节 {section.title} 缺少有效工具证据，使用 runtime grounded fallback "
+                f"（tool_calls={tool_calls_count}）"
+            )
+            final_answer = self._build_grounded_runtime_fallback(tool_evidence_records)
+            if self.report_logger:
+                self.report_logger.log(
+                    action="section_grounded_fallback",
+                    stage="generating",
+                    section_title=section.title,
+                    section_index=section_index,
+                    details={
+                        "message": "All tool calls were empty or low-signal; replaced section with runtime-grounded fallback.",
+                        "tool_calls_count": tool_calls_count,
+                        "tool_evidence": tool_evidence_records,
+                    },
+                )
+
+        if self.report_logger:
+            self.report_logger.log_section_content(
+                section_title=section.title,
+                section_index=section_index,
+                content=final_answer,
+                tool_calls_count=tool_calls_count,
+            )
+        return final_answer
     
     def _parse_tool_calls(self, response: str) -> List[Dict[str, Any]]:
         """
@@ -1409,6 +1683,7 @@ class ReportAgent:
         min_tool_calls = 3  # 最少工具调用次数
         conflict_retries = 0  # 工具调用与Final Answer同时出现的连续冲突次数
         used_tools = set()  # 记录已调用过的工具名
+        tool_evidence_records: List[Dict[str, Any]] = []
         all_tools = self._available_tool_names()
 
         # 报告上下文，用于InsightForge的子问题生成
@@ -1516,15 +1791,13 @@ class ReportAgent:
                 # 正常结束
                 final_answer = response.split("Final Answer:")[-1].strip()
                 logger.info(f"章节 {section.title} 生成完成（工具调用: {tool_calls_count}次）")
-
-                if self.report_logger:
-                    self.report_logger.log_section_content(
-                        section_title=section.title,
-                        section_index=section_index,
-                        content=final_answer,
-                        tool_calls_count=tool_calls_count
-                    )
-                return final_answer
+                return self._finalize_section_output(
+                    section=section,
+                    section_index=section_index,
+                    content=final_answer,
+                    tool_calls_count=tool_calls_count,
+                    tool_evidence_records=tool_evidence_records,
+                )
 
             # ── 情况2：LLM 尝试调用工具 ──
             if has_tool_calls:
@@ -1554,18 +1827,24 @@ class ReportAgent:
                         iteration=iteration + 1
                     )
 
-                result = self._execute_tool(
+                payload = self._execute_tool_payload(
                     call["name"],
                     call.get("parameters", {}),
                     report_context=report_context
                 )
+                result = payload.get("text", "")
+                log_result = payload.get("log_text", result)
+                tool_evidence_records.append(payload.get("evidence") or {
+                    "tool_name": call["name"],
+                    "meaningful": False,
+                })
 
                 if self.report_logger:
                     self.report_logger.log_tool_result(
                         section_title=section.title,
                         section_index=section_index,
                         tool_name=call["name"],
-                        result=result,
+                        result=log_result,
                         iteration=iteration + 1
                     )
 
@@ -1611,18 +1890,16 @@ class ReportAgent:
                 continue
 
             # 工具调用已足够，LLM 输出了内容但没带 "Final Answer:" 前缀
-            # 直接将这段内容作为最终答案，不再空转
-            logger.info(f"章节 {section.title} 未检测到 'Final Answer:' 前缀，直接采纳LLM输出作为最终内容（工具调用: {tool_calls_count}次）")
+            # 这时依然需要经过 grounding guard，避免空工具结果直接放行
+            logger.info(f"章节 {section.title} 未检测到 'Final Answer:' 前缀，尝试以当前内容完成章节（工具调用: {tool_calls_count}次）")
             final_answer = response.strip()
-
-            if self.report_logger:
-                self.report_logger.log_section_content(
-                    section_title=section.title,
-                    section_index=section_index,
-                    content=final_answer,
-                    tool_calls_count=tool_calls_count
-                )
-            return final_answer
+            return self._finalize_section_output(
+                section=section,
+                section_index=section_index,
+                content=final_answer,
+                tool_calls_count=tool_calls_count,
+                tool_evidence_records=tool_evidence_records,
+            )
         
         # 达到最大迭代次数，强制生成内容
         logger.warning(f"章节 {section.title} 达到最大迭代次数，强制生成")
@@ -1643,16 +1920,13 @@ class ReportAgent:
         else:
             final_answer = response
         
-        # 记录章节内容生成完成日志
-        if self.report_logger:
-            self.report_logger.log_section_content(
-                section_title=section.title,
-                section_index=section_index,
-                content=final_answer,
-                tool_calls_count=tool_calls_count
-            )
-        
-        return final_answer
+        return self._finalize_section_output(
+            section=section,
+            section_index=section_index,
+            content=final_answer,
+            tool_calls_count=tool_calls_count,
+            tool_evidence_records=tool_evidence_records,
+        )
     
     def generate_report(
         self, 
@@ -2628,6 +2902,7 @@ class ReportManager:
     def get_report_by_simulation(cls, simulation_id: str) -> Optional[Report]:
         """根据模拟ID获取报告"""
         cls._ensure_reports_dir()
+        reports = []
         
         for item in os.listdir(cls.REPORTS_DIR):
             item_path = os.path.join(cls.REPORTS_DIR, item)
@@ -2635,15 +2910,30 @@ class ReportManager:
             if os.path.isdir(item_path):
                 report = cls.get_report(item)
                 if report and report.simulation_id == simulation_id:
-                    return report
+                    reports.append(report)
             # 兼容旧格式：JSON文件
             elif item.endswith('.json'):
                 report_id = item[:-5]
                 report = cls.get_report(report_id)
                 if report and report.simulation_id == simulation_id:
-                    return report
-        
-        return None
+                    reports.append(report)
+
+        if not reports:
+            return None
+
+        completed_reports = [r for r in reports if r.status == ReportStatus.COMPLETED]
+        if completed_reports:
+            completed_reports.sort(
+                key=lambda r: ((r.completed_at or r.created_at or ""), (r.created_at or ""), r.report_id),
+                reverse=True,
+            )
+            return completed_reports[0]
+
+        reports.sort(
+            key=lambda r: ((r.created_at or ""), r.report_id),
+            reverse=True,
+        )
+        return reports[0]
     
     @classmethod
     def list_reports(cls, simulation_id: Optional[str] = None, limit: int = 50) -> List[Report]:

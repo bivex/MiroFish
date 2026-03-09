@@ -47,6 +47,7 @@ class Project:
     
     # 配置
     simulation_requirement: Optional[str] = None
+    recommended_prepare_entity_types: List[str] = field(default_factory=list)
     chunk_size: int = 500
     chunk_overlap: int = 50
     
@@ -69,6 +70,7 @@ class Project:
             "graph_backend": self.graph_backend,
             "graph_build_task_id": self.graph_build_task_id,
             "simulation_requirement": self.simulation_requirement,
+            "recommended_prepare_entity_types": self.recommended_prepare_entity_types,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
             "error": self.error
@@ -95,6 +97,7 @@ class Project:
             graph_backend=data.get('graph_backend', 'zep'),
             graph_build_task_id=data.get('graph_build_task_id'),
             simulation_requirement=data.get('simulation_requirement'),
+            recommended_prepare_entity_types=data.get('recommended_prepare_entity_types', []),
             chunk_size=data.get('chunk_size', 500),
             chunk_overlap=data.get('chunk_overlap', 50),
             error=data.get('error')

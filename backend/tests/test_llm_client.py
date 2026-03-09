@@ -94,3 +94,41 @@ def test_llm_client_prefers_native_tools_for_groq_routes():
 
     assert groq_client.prefers_native_tools() is True
     assert openai_client.prefers_native_tools() is False
+
+
+def test_llm_client_retries_without_native_tools_on_tool_validation_error():
+    module = load_llm_client_module()
+    client = module.LLMClient(
+        api_key="dummy-key",
+        base_url="https://api.groq.com/openai/v1",
+        model="openai/gpt-oss-20b",
+    )
+
+    calls = []
+
+    def fake_create(**kwargs):
+        calls.append(dict(kwargs))
+        if "tools" in kwargs:
+            raise RuntimeError("Tool call validation failed: parameters for tool insight_forge did not match schema")
+        message = types.SimpleNamespace(
+            content='<tool_call>\n{"name":"quick_search","parameters":{"query":"forged decree rumor","limit":2}}\n</tool_call>',
+            tool_calls=None,
+        )
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
+
+    client.client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=fake_create))
+    )
+
+    response = client.chat(
+        messages=[{"role": "user", "content": "Search"}],
+        tools=[{"type": "function", "function": {"name": "quick_search"}}],
+        tool_choice="auto",
+    )
+
+    assert len(calls) == 2
+    assert "tools" in calls[0]
+    assert "tool_choice" in calls[0]
+    assert "tools" not in calls[1]
+    assert "tool_choice" not in calls[1]
+    assert '"name":"quick_search"' in response

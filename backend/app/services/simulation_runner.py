@@ -247,6 +247,45 @@ class SimulationRunner:
         return state
 
     @classmethod
+    def get_public_runner_status(cls, state: Optional[SimulationRunState]) -> RunnerStatus:
+        """
+        返回面向 API/UI 的可见运行状态。
+
+        当模拟轮次已经全部结束、但主进程仍存活等待 IPC / close-env 时，
+        raw runner_status 仍会保持为 running。为了避免 read-path 长期误报，
+        这里对外展示为 completed，但不修改底层状态机。
+        """
+        if not state:
+            return RunnerStatus.IDLE
+
+        if state.runner_status != RunnerStatus.RUNNING:
+            return state.runner_status
+
+        if state.twitter_running or state.reddit_running:
+            return state.runner_status
+
+        if cls._check_all_platforms_completed(state):
+            return RunnerStatus.COMPLETED
+
+        return state.runner_status
+
+    @classmethod
+    def get_public_run_state_dict(
+        cls,
+        state: Optional[SimulationRunState],
+    ) -> Optional[Dict[str, Any]]:
+        """将运行状态序列化为面向 API/UI 的可见状态字典。"""
+        if not state:
+            return None
+
+        result = state.to_dict()
+        public_status = cls.get_public_runner_status(state)
+        result["runner_status"] = public_status.value
+        if public_status == RunnerStatus.COMPLETED and not result.get("completed_at"):
+            result["completed_at"] = state.updated_at
+        return result
+
+    @classmethod
     def _is_pid_alive(cls, pid: Optional[int]) -> bool:
         """检查 PID 对应的进程是否仍然存活。"""
         if not pid:

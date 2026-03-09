@@ -33,7 +33,7 @@ def _collect_runtime_evidence(simulation_id: str) -> Dict[str, Any]:
             "has_runtime_evidence": False,
         }
 
-    runner_status_value = getattr(run_state, 'runner_status', 'idle')
+    runner_status_value = SimulationRunner.get_public_runner_status(run_state)
     runner_status = getattr(runner_status_value, 'value', runner_status_value)
     total_actions = int(getattr(run_state, 'twitter_actions_count', 0)) + int(getattr(run_state, 'reddit_actions_count', 0))
     current_round = int(getattr(run_state, 'current_round', 0))
@@ -1073,6 +1073,96 @@ def get_graph_statistics_tool():
         
     except Exception as e:
         logger.error(f"获取图谱统计失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@report_bp.route('/tools/panorama', methods=['POST'])
+def panorama_search_tool():
+    """Panorama search debug endpoint."""
+    try:
+        data = request.get_json() or {}
+
+        graph_id = data.get('graph_id')
+        query = data.get('query')
+        include_expired = data.get('include_expired', True)
+        limit = data.get('limit', 50)
+        graph_backend = data.get('graph_backend') or Config.get_graph_backend()
+
+        if not graph_id or not query:
+            return jsonify({
+                "success": False,
+                "error": "Please provide graph_id and query"
+            }), 400
+
+        tools = get_report_tools_service(graph_backend=graph_backend)
+        kwargs = {
+            'graph_id': graph_id,
+            'query': query,
+            'include_expired': include_expired,
+            'limit': limit,
+        }
+        if graph_backend == 'cognee' and data.get('simulation_id'):
+            kwargs['simulation_id'] = data.get('simulation_id')
+
+        result = tools.panorama_search(**kwargs)
+
+        return jsonify({
+            "success": True,
+            "data": result.to_dict()
+        })
+
+    except Exception as e:
+        logger.error(f"Panorama search failed: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@report_bp.route('/tools/insight-forge', methods=['POST'])
+def insight_forge_tool():
+    """Insight forge debug endpoint."""
+    try:
+        data = request.get_json() or {}
+
+        graph_id = data.get('graph_id')
+        query = data.get('query')
+        simulation_requirement = data.get('simulation_requirement') or query
+        report_context = data.get('report_context', '')
+        max_sub_queries = data.get('max_sub_queries', 5)
+        graph_backend = data.get('graph_backend') or Config.get_graph_backend()
+
+        if not graph_id or not query:
+            return jsonify({
+                "success": False,
+                "error": "Please provide graph_id and query"
+            }), 400
+
+        tools = get_report_tools_service(graph_backend=graph_backend)
+        kwargs = {
+            'graph_id': graph_id,
+            'query': query,
+            'simulation_requirement': simulation_requirement,
+            'report_context': report_context,
+            'max_sub_queries': max_sub_queries,
+        }
+        if graph_backend == 'cognee' and data.get('simulation_id'):
+            kwargs['simulation_id'] = data.get('simulation_id')
+
+        result = tools.insight_forge(**kwargs)
+
+        return jsonify({
+            "success": True,
+            "data": result.to_dict()
+        })
+
+    except Exception as e:
+        logger.error(f"Insight forge failed: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),

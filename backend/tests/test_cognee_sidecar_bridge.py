@@ -1,5 +1,7 @@
 import asyncio
 import importlib.util
+import sys
+import types
 from pathlib import Path
 
 
@@ -55,6 +57,39 @@ def test_resolve_embedding_settings_defaults_to_fastembed_for_groq():
     assert settings["embedding_provider"] == "fastembed"
     assert settings["embedding_model"] == "BAAI/bge-small-en-v1.5"
     assert settings["embedding_dimensions"] == 384
+
+
+def test_is_groq_routed_uses_env_fallback(monkeypatch):
+    module = load_bridge_module()
+
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
+    monkeypatch.delenv("REPORT_LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_MODEL_NAME", raising=False)
+
+    assert module.is_groq_routed({}) is True
+
+
+def test_apply_non_null_settings_preserves_existing_defaults():
+    module = load_bridge_module()
+
+    target = types.SimpleNamespace(
+        embedding_provider="openai",
+        embedding_model="openai/text-embedding-3-large",
+        embedding_dimensions=3072,
+    )
+
+    module.apply_non_null_settings(
+        target,
+        {
+            "embedding_provider": None,
+            "embedding_model": None,
+            "embedding_dimensions": 384,
+        },
+    )
+
+    assert target.embedding_provider == "openai"
+    assert target.embedding_model == "openai/text-embedding-3-large"
+    assert target.embedding_dimensions == 384
 
 
 def test_resolve_llm_instructor_mode_defaults_to_json_schema_for_groq():
@@ -127,6 +162,37 @@ def test_extract_completion_payload_reads_json_from_tool_arguments():
     extracted = module.extract_completion_payload(response)
 
     assert extracted == {"nodes": [{"id": "Aria", "type": "Person"}], "edges": []}
+
+
+def test_normalize_search_result_handles_none_payloads():
+    module = load_bridge_module()
+
+    assert module.normalize_search_result(None) == {"dataset_name": None, "search_result": ""}
+    assert module.normalize_search_result({"dataset_name": "g1", "search_result": None, "text": "fallback chunk"}) == {
+        "dataset_name": "g1",
+        "search_result": "fallback chunk",
+    }
+
+
+def test_search_graph_skips_empty_results_from_cognee():
+    module = load_bridge_module()
+
+    class FakeCognee:
+        async def search(self, *args, **kwargs):
+            return [None, {"dataset_name": "g1", "search_result": None, "content": "useful chunk"}]
+
+    module.configure_cognee = lambda payload: FakeCognee()
+
+    search_type_module = types.ModuleType("cognee.modules.search.types.SearchType")
+    search_type_module.SearchType = type("SearchType", (), {"CHUNKS": "chunks"})
+    sys.modules["cognee.modules.search.types.SearchType"] = search_type_module
+
+    result = asyncio.run(module.search_graph({"graph_id": "g1", "query": "harbor", "limit": 5}))
+
+    assert result == {
+        "graph_id": "g1",
+        "results": [{"dataset_name": "g1", "search_result": "useful chunk"}],
+    }
 
 
 def test_should_bypass_knowledge_graph_structured_output_for_groq_route():

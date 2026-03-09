@@ -52,7 +52,13 @@ def load_cognee_tools_module():
 
 
 class SidecarStub:
+    def __init__(self, *, search_results=None, search_error="search unavailable"):
+        self.get_graph_data_calls = 0
+        self.search_results = list(search_results or [])
+        self.search_error = search_error
+
     def get_graph_data(self, graph_id):
+        self.get_graph_data_calls += 1
         return {
             "graph_id": graph_id,
             "nodes": [
@@ -65,7 +71,9 @@ class SidecarStub:
         }
 
     def search_graph(self, graph_id, query, limit):
-        raise RuntimeError("search unavailable")
+        if self.search_error:
+            raise RuntimeError(self.search_error)
+        return {"graph_id": graph_id, "results": self.search_results[:limit]}
 
 
 @dataclass
@@ -95,13 +103,20 @@ def test_cognee_tools_search_graph_falls_back_to_local_matches():
     runner = sys.modules["app.services.simulation_runner"].SimulationRunner
     runner.run_state = None
     runner.actions = []
-    service = module.CogneeToolsService(sidecar_client=SidecarStub(), entity_reader=object())
+    sidecar = SidecarStub()
+    service = module.CogneeToolsService(sidecar_client=sidecar, entity_reader=object())
 
     result = service.search_graph("graph_1", "Harbor Guild", limit=5)
 
-    assert result.total_count == 1
-    assert result.facts == ["Aria supports Harbor Guild"]
+    assert result.total_count >= 1
+    assert result.facts[0] == "Aria supports Harbor Guild"
+    assert "Guild controls the harbor" in result.facts
     assert result.nodes[0]["name"] == "Harbor Guild"
+    assert result.diagnostics["fallback_used"] is True
+    assert result.diagnostics["fallback_mode"] == "local_graph_edges"
+    assert result.diagnostics["sidecar_search_ok"] is False
+    assert "search unavailable" in result.diagnostics["sidecar_search_error"]
+    assert sidecar.get_graph_data_calls == 1
 
 
 def test_cognee_tools_get_simulation_context_matches_zep_shape():
@@ -109,7 +124,8 @@ def test_cognee_tools_get_simulation_context_matches_zep_shape():
     runner = sys.modules["app.services.simulation_runner"].SimulationRunner
     runner.run_state = None
     runner.actions = []
-    service = module.CogneeToolsService(sidecar_client=SidecarStub(), entity_reader=object())
+    sidecar = SidecarStub()
+    service = module.CogneeToolsService(sidecar_client=sidecar, entity_reader=object())
 
     result = service.get_simulation_context("graph_1", "Run a harbor crisis simulation", limit=10)
 
@@ -117,6 +133,9 @@ def test_cognee_tools_get_simulation_context_matches_zep_shape():
     assert result["graph_statistics"]["entity_types"]["Organization"] == 1
     assert result["total_entities"] == 2
     assert result["entities"][0]["type"] in {"Organization", "Actor"}
+    assert result["diagnostics"]["search"]["graph_data_source"] == "cache"
+    assert result["graph_statistics"]["diagnostics"]["graph_data_source"] == "cache"
+    assert sidecar.get_graph_data_calls == 1
 
 
 def test_cognee_tools_runtime_evidence_is_exposed_in_context_and_search():
@@ -144,3 +163,103 @@ def test_cognee_tools_runtime_evidence_is_exposed_in_context_and_search():
     assert result["runtime_evidence"]["has_runtime_evidence"] is True
     assert result["related_facts"][0] == evidence["action_facts"][0]
     assert search.facts[0] == evidence["action_facts"][0]
+    assert search.diagnostics["runtime_fact_count"] == 1
+    assert search.diagnostics["fallback_mode"] == "runtime_actions"
+    assert "runtime_actions" in search.diagnostics["evidence_sources"]
+
+
+def test_cognee_tools_insight_forge_exposes_nested_diagnostics_and_uses_cache():
+    module = load_cognee_tools_module()
+    runner = sys.modules["app.services.simulation_runner"].SimulationRunner
+    runner.run_state = None
+    runner.actions = []
+    sidecar = SidecarStub(search_results=[{"search_result": "Harbor Guild tightened tariff policy."}], search_error=None)
+    service = module.CogneeToolsService(sidecar_client=sidecar, entity_reader=object())
+
+    result = service.insight_forge("graph_1", "Harbor Guild", "Analyze the harbor crisis", simulation_id="sim_1")
+
+    assert result.semantic_facts[0] == "Harbor Guild tightened tariff policy."
+    assert result.diagnostics["quick_search"]["sidecar_search_ok"] is True
+    assert "sidecar_search" in result.diagnostics["evidence_sources"]
+    assert result.diagnostics["panorama_search"]["graph_data_source"] == "cache"
+    assert sidecar.get_graph_data_calls == 1
+
+
+def test_cognee_tools_filters_opaque_ids_from_fallback_fact_candidates():
+    module = load_cognee_tools_module()
+    service = module.CogneeToolsService(sidecar_client=SidecarStub(), entity_reader=object())
+
+    assert service._edge_fact_candidates([{"name": "967c8fef-d2a0-5a49-84b1-cb331289ed7c"}]) == []
+    assert service._node_fact_candidates([{"name": "Aria"}, {"summary": "Harbor unrest is escalating"}]) == [
+        "Aria",
+        "Harbor unrest is escalating",
+    ]
+
+
+def test_cognee_tools_panorama_search_humanizes_edge_facts_and_names():
+    module = load_cognee_tools_module()
+
+    class SidecarHumanizeStub(SidecarStub):
+        def get_graph_data(self, graph_id):
+            self.get_graph_data_calls += 1
+            return {
+                "graph_id": graph_id,
+                "nodes": [
+                    {"uuid": "n1", "name": "Royal Court", "labels": ["Entity", "Organization"], "summary": "Court manages succession disputes", "attributes": {"type": "Organization"}},
+                    {"uuid": "n2", "name": "Harbor Guard", "labels": ["Entity", "Faction"], "summary": "Guard controls the docks", "attributes": {"type": "Faction"}},
+                ],
+                "edges": [
+                    {"uuid": "e1", "name": "CONTAINS", "fact": "967c8fef-d2a0-5a49-84b1-cb331289ed7c", "source_node_uuid": "n1", "target_node_uuid": "n2"},
+                ],
+            }
+
+    runner = sys.modules["app.services.simulation_runner"].SimulationRunner
+    runner.run_state = None
+    runner.actions = []
+    service = module.CogneeToolsService(sidecar_client=SidecarHumanizeStub(), entity_reader=object())
+
+    result = service.panorama_search("graph_1", "contains", limit=5)
+
+    assert result.all_edges[0].name == "contains"
+    assert result.all_edges[0].fact == "Royal Court contains Harbor Guard"
+    assert result.all_edges[0].source_node_name == "Royal Court"
+    assert result.all_edges[0].target_node_name == "Harbor Guard"
+    assert result.active_facts == ["Royal Court contains Harbor Guard"]
+
+
+def test_cognee_tools_insight_forge_compacts_noisy_semantic_facts():
+    module = load_cognee_tools_module()
+
+    class SidecarInsightStub(SidecarStub):
+        def get_graph_data(self, graph_id):
+            self.get_graph_data_calls += 1
+            return {
+                "graph_id": graph_id,
+                "nodes": [
+                    {"uuid": "n1", "name": "Royal Court", "labels": ["Entity", "Organization"], "summary": "Court manages succession disputes", "attributes": {"type": "Organization"}},
+                    {"uuid": "n2", "name": "Court Guard", "labels": ["Entity", "Faction"], "summary": "Guard circulates news through the city", "attributes": {"type": "Faction"}},
+                ],
+                "edges": [
+                    {"uuid": "e1", "name": "SPREADS_RUMOR_TO", "fact": "SPREADS_RUMOR_TO", "source_node_uuid": "n2", "target_node_uuid": "n1"},
+                ],
+            }
+
+    runner = sys.modules["app.services.simulation_runner"].SimulationRunner
+    runner.run_state = None
+    runner.actions = []
+    sidecar = SidecarInsightStub(
+        search_results=[
+            {
+                "search_result": "canonical_id: 967c8fef-d2a0-5a49-84b1-cb331289ed7c\nThe forged decree reached the Royal Court.\nCourt guards spread the rumor through the harbor.",
+            }
+        ],
+        search_error=None,
+    )
+    service = module.CogneeToolsService(sidecar_client=sidecar, entity_reader=object())
+
+    result = service.insight_forge("graph_1", "spreads rumor", "Analyze rumor escalation", simulation_id="sim_1")
+
+    assert result.semantic_facts == [
+        "The forged decree reached the Royal Court. Court guards spread the rumor through the harbor."
+    ]
+    assert result.relationship_chains[0] == "Court Guard spreads rumor to Royal Court"

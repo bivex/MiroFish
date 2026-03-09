@@ -163,3 +163,148 @@ def test_generate_status_http_prefers_task_id_over_completed_simulation_report()
     assert payload["data"]["metadata"]["report_id"] == "report_new"
     assert calls["task_ids"] == ["task_new"]
     assert calls["simulation_ids"] == []
+
+
+def test_get_report_by_simulation_http_returns_manager_selected_report():
+    module, _, _ = load_report_api_blueprint_module()
+
+    report = types.SimpleNamespace(
+        report_id="report_latest_completed",
+        status="completed",
+        to_dict=lambda: {
+            "report_id": "report_latest_completed",
+            "simulation_id": "sim_1",
+            "status": "completed",
+        },
+    )
+    module.ReportManager = types.SimpleNamespace(get_report_by_simulation=lambda simulation_id: report)
+
+    response = module.get_report_by_simulation("sim_1")
+
+    assert response["success"] is True
+    assert response["has_report"] is True
+    assert response["data"]["report_id"] == "report_latest_completed"
+
+
+def test_collect_runtime_evidence_uses_public_runner_status():
+    module, _, _ = load_report_api_blueprint_module()
+
+    run_state = types.SimpleNamespace(
+        runner_status=types.SimpleNamespace(value="running"),
+        current_round=12,
+        twitter_actions_count=18,
+        reddit_actions_count=0,
+        recent_actions=[],
+    )
+    module.SimulationRunner = types.SimpleNamespace(
+        get_run_state=lambda simulation_id: run_state,
+        get_public_runner_status=lambda state: types.SimpleNamespace(value="completed"),
+    )
+
+    payload = module._collect_runtime_evidence("sim_1")
+
+    assert payload["simulation_id"] == "sim_1"
+    assert payload["runner_status"] == "completed"
+    assert payload["current_round"] == 12
+    assert payload["total_actions"] == 18
+    assert payload["has_runtime_evidence"] is True
+
+
+def test_panorama_tool_http_returns_serialized_result():
+    module, report_bp, request_obj = load_report_api_blueprint_module()
+
+    class ToolStub:
+        def __init__(self):
+            self.calls = []
+
+        def panorama_search(self, **kwargs):
+            self.calls.append(kwargs)
+            return types.SimpleNamespace(
+                to_dict=lambda: {
+                    "query": kwargs["query"],
+                    "active_facts": ["Royal Court monitors the rumor"],
+                    "diagnostics": {"graph_id": kwargs["graph_id"], "fallback_used": False},
+                }
+            )
+
+    tools = ToolStub()
+    module.get_report_tools_service = lambda graph_backend=None: tools
+
+    app = FakeFlaskApp(request_obj)
+    app.register_blueprint(report_bp, url_prefix="/api/report")
+    client = app.test_client()
+
+    response = client.post(
+        "/api/report/tools/panorama",
+        json={
+            "graph_id": "g1",
+            "query": "royal court rumor",
+            "limit": 7,
+            "graph_backend": "cognee",
+            "simulation_id": "sim_1",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["data"]["query"] == "royal court rumor"
+    assert payload["data"]["diagnostics"]["graph_id"] == "g1"
+    assert tools.calls == [{
+        "graph_id": "g1",
+        "query": "royal court rumor",
+        "include_expired": True,
+        "limit": 7,
+        "simulation_id": "sim_1",
+    }]
+
+
+def test_insight_forge_tool_http_defaults_simulation_requirement_to_query():
+    module, report_bp, request_obj = load_report_api_blueprint_module()
+
+    class ToolStub:
+        def __init__(self):
+            self.calls = []
+
+        def insight_forge(self, **kwargs):
+            self.calls.append(kwargs)
+            return types.SimpleNamespace(
+                to_dict=lambda: {
+                    "query": kwargs["query"],
+                    "simulation_requirement": kwargs["simulation_requirement"],
+                    "semantic_facts": ["Forgery claim is spreading through the court"],
+                    "diagnostics": {"quick_search": {"sidecar_search_ok": True}},
+                }
+            )
+
+    tools = ToolStub()
+    module.get_report_tools_service = lambda graph_backend=None: tools
+
+    app = FakeFlaskApp(request_obj)
+    app.register_blueprint(report_bp, url_prefix="/api/report")
+    client = app.test_client()
+
+    response = client.post(
+        "/api/report/tools/insight-forge",
+        json={
+            "graph_id": "g1",
+            "query": "royal succession rumor",
+            "max_sub_queries": 4,
+            "graph_backend": "cognee",
+            "simulation_id": "sim_2",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["data"]["simulation_requirement"] == "royal succession rumor"
+    assert payload["data"]["diagnostics"]["quick_search"]["sidecar_search_ok"] is True
+    assert tools.calls == [{
+        "graph_id": "g1",
+        "query": "royal succession rumor",
+        "simulation_requirement": "royal succession rumor",
+        "report_context": "",
+        "max_sub_queries": 4,
+        "simulation_id": "sim_2",
+    }]

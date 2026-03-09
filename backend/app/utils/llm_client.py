@@ -67,6 +67,12 @@ class LLMClient:
             }
             chunks.append(f"<tool_call>\n{json.dumps(payload, ensure_ascii=False)}\n</tool_call>")
         return "\n\n".join(chunks)
+
+    def _should_retry_without_native_tools(self, exc: Exception, tools: Optional[List[Dict[str, Any]]]) -> bool:
+        if not tools or not self.prefers_native_tools():
+            return False
+        message = str(exc)
+        return "Tool call validation failed" in message or "tool_use_failed" in message
     
     def chat(
         self,
@@ -103,7 +109,17 @@ class LLMClient:
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
         
-        response = self.client.chat.completions.create(**kwargs)
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if not self._should_retry_without_native_tools(exc, tools):
+                raise
+
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs.pop("tools", None)
+            fallback_kwargs.pop("tool_choice", None)
+            response = self.client.chat.completions.create(**fallback_kwargs)
+
         message = response.choices[0].message
         content = self._strip_think_blocks(getattr(message, "content", None))
         native_tool_text = self._format_native_tool_calls(getattr(message, "tool_calls", None))

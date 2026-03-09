@@ -112,12 +112,18 @@ def normalize_edge(raw: Any) -> dict[str, Any]:
 
 
 def normalize_search_result(raw: Any) -> dict[str, Any]:
-    if hasattr(raw, "model_dump"):
-        raw = raw.model_dump()
+    raw = _model_dump(raw)
+    if raw is None:
+        return {"dataset_name": None, "search_result": ""}
 
     result = raw.get("search_result") if isinstance(raw, dict) else raw
-    if hasattr(result, "model_dump"):
-        result = result.model_dump()
+    result = _model_dump(result)
+    if result is None and isinstance(raw, dict):
+        result = raw.get("text") or raw.get("content") or raw.get("chunk_text") or ""
+    if result is None:
+        result = ""
+    elif not isinstance(result, (str, dict, list, int, float, bool)):
+        result = str(result)
 
     return {
         "dataset_name": raw.get("dataset_name") if isinstance(raw, dict) else None,
@@ -131,6 +137,19 @@ def _coerce_string(value: Any, default: str = "") -> str:
     if isinstance(value, str):
         return value.strip() or default
     return str(value).strip() or default
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+            continue
+        return value
+    return None
 
 
 def _model_dump(value: Any) -> Any:
@@ -475,7 +494,7 @@ def install_groq_knowledge_graph_patch(groq_routed: bool) -> None:
 
 
 def resolve_llm_provider(payload: dict[str, Any]) -> str:
-    provider = str(payload.get("llm_provider") or "").lower()
+    provider = _coerce_string(_first_present(payload.get("llm_provider"), os.environ.get("LLM_PROVIDER"))).lower()
 
     if provider == "groq":
         return "openai"
@@ -485,9 +504,15 @@ def resolve_llm_provider(payload: dict[str, Any]) -> str:
 
 
 def is_groq_routed(payload: dict[str, Any]) -> bool:
-    endpoint = str(payload.get("llm_endpoint") or "").lower()
-    model = str(payload.get("llm_model") or "").lower()
-    provider = str(payload.get("llm_provider") or "").lower()
+    endpoint = _coerce_string(_first_present(payload.get("llm_endpoint"), os.environ.get("LLM_BASE_URL"))).lower()
+    model = _coerce_string(
+        _first_present(
+            payload.get("llm_model"),
+            os.environ.get("REPORT_LLM_MODEL"),
+            os.environ.get("LLM_MODEL_NAME"),
+        )
+    ).lower()
+    provider = _coerce_string(_first_present(payload.get("llm_provider"), os.environ.get("LLM_PROVIDER"))).lower()
     return "api.groq.com" in endpoint or model.startswith("groq/") or provider == "groq"
 
 
@@ -534,6 +559,13 @@ def resolve_llm_instructor_mode(payload: dict[str, Any], groq_routed: bool) -> s
     return ""
 
 
+def apply_non_null_settings(target: Any, settings: dict[str, Any]) -> None:
+    for key, value in settings.items():
+        if value is None:
+            continue
+        object.__setattr__(target, key, value)
+
+
 def configure_cognee(payload: dict[str, Any]):
     os.environ.setdefault("ENABLE_BACKEND_ACCESS_CONTROL", "false")
 
@@ -541,9 +573,18 @@ def configure_cognee(payload: dict[str, Any]):
     from cognee.infrastructure.llm import get_llm_config
     from cognee.infrastructure.databases.vector.embeddings.config import get_embedding_config
 
+    llm_api_key = _first_present(payload.get("llm_api_key"), os.environ.get("LLM_API_KEY"))
+    llm_endpoint = _first_present(payload.get("llm_endpoint"), os.environ.get("LLM_BASE_URL"))
     llm_provider = resolve_llm_provider(payload)
     groq_routed = is_groq_routed(payload)
-    llm_model = normalize_llm_model(payload.get("llm_model"), groq_routed)
+    llm_model = normalize_llm_model(
+        _first_present(
+            payload.get("llm_model"),
+            os.environ.get("REPORT_LLM_MODEL"),
+            os.environ.get("LLM_MODEL_NAME"),
+        ),
+        groq_routed,
+    )
     embedding_settings = resolve_embedding_settings(payload, groq_routed)
     llm_instructor_mode = resolve_llm_instructor_mode(payload, groq_routed)
     install_groq_knowledge_graph_patch(groq_routed)
@@ -554,16 +595,15 @@ def configure_cognee(payload: dict[str, Any]):
     cognee.config.data_root_directory = str(Path.cwd() / ".data_storage")
     cognee.config.set_llm_provider(llm_provider)
 
-    if payload.get("llm_api_key"):
-        cognee.config.set_llm_api_key(payload["llm_api_key"])
-    if payload.get("llm_endpoint"):
-        cognee.config.set_llm_endpoint(payload["llm_endpoint"])
+    if llm_api_key:
+        cognee.config.set_llm_api_key(llm_api_key)
+    if llm_endpoint:
+        cognee.config.set_llm_endpoint(llm_endpoint)
     if llm_model:
         cognee.config.set_llm_model(llm_model)
     object.__setattr__(llm_config, "llm_instructor_mode", llm_instructor_mode)
 
-    for key, value in embedding_settings.items():
-        object.__setattr__(embedding_config, key, value)
+    apply_non_null_settings(embedding_config, embedding_settings)
 
     return cognee
 
@@ -619,10 +659,18 @@ async def search_graph(payload: dict[str, Any]) -> dict[str, Any]:
         datasets=payload.get("dataset_name") or payload.get("graph_id"),
         top_k=payload.get("limit", 10),
         only_context=False,
-    )
+    ) or []
+
+    normalized_results = []
+    for item in results:
+        normalized = normalize_search_result(item)
+        if normalized.get("search_result") in {None, ""}:
+            continue
+        normalized_results.append(normalized)
+
     return {
         "graph_id": payload.get("graph_id"),
-        "results": [normalize_search_result(item) for item in results],
+        "results": normalized_results,
     }
 
 

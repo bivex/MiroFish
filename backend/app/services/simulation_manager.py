@@ -6,6 +6,7 @@ OASIS模拟管理器
 
 import os
 import json
+import csv
 import shutil
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
@@ -495,13 +496,39 @@ class SimulationManager:
             raise ValueError(f"模拟不存在: {simulation_id}")
         
         sim_dir = self._get_simulation_dir(simulation_id)
-        profile_path = os.path.join(sim_dir, f"{platform}_profiles.json")
+        if platform == "twitter":
+            profile_path = os.path.join(sim_dir, "twitter_profiles.csv")
+        else:
+            profile_path = os.path.join(sim_dir, f"{platform}_profiles.json")
         
         if not os.path.exists(profile_path):
             return []
         
-        with open(profile_path, 'r', encoding='utf-8') as f:
+        with open(profile_path, 'r', encoding='utf-8', newline='') as f:
+            if platform == "twitter":
+                return [self._normalize_twitter_profile_row(row) for row in csv.DictReader(f)]
             return json.load(f)
+
+    @staticmethod
+    def _normalize_twitter_profile_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(row)
+        normalized["user_char"] = (
+            normalized.get("user_char")
+            or normalized.get("persona")
+            or normalized.get("profile")
+            or normalized.get("stance")
+            or normalized.get("bio")
+            or ""
+        )
+        normalized["description"] = (
+            normalized.get("description")
+            or normalized.get("bio")
+            or normalized.get("persona")
+            or normalized.get("profile")
+            or normalized.get("role")
+            or ""
+        )
+        return normalized
     
     def get_simulation_config(self, simulation_id: str) -> Optional[Dict[str, Any]]:
         """获取模拟配置"""

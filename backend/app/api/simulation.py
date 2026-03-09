@@ -484,6 +484,12 @@ def prepare_simulation():
         document_text = ProjectManager.get_extracted_text(state.project_id) or ""
         
         entity_types_list = data.get('entity_types')
+        if not entity_types_list:
+            entity_types_list = getattr(project, 'recommended_prepare_entity_types', None) or [
+                item.get('name')
+                for item in ((project.ontology or {}).get('entity_types') or [])
+                if isinstance(item, dict) and item.get('name')
+            ] or None
         use_llm_for_profiles = data.get('use_llm_for_profiles', True)
         parallel_profile_count = data.get('parallel_profile_count', 5)
         
@@ -953,8 +959,11 @@ def get_simulation_history():
             # 获取运行状态（从 run_state.json 读取用户设置的实际轮数）
             run_state = SimulationRunner.get_run_state(sim.simulation_id)
             if run_state:
+                public_runner_status = SimulationRunner.get_public_runner_status(run_state)
                 sim_dict["current_round"] = run_state.current_round
-                sim_dict["runner_status"] = run_state.runner_status.value
+                sim_dict["runner_status"] = public_runner_status.value
+                if sim_dict.get("status") == "running" and public_runner_status == RunnerStatus.COMPLETED:
+                    sim_dict["status"] = "completed"
                 # 使用用户设置的 total_rounds，若无则使用推荐轮数
                 sim_dict["total_rounds"] = run_state.total_rounds if run_state.total_rounds > 0 else recommended_rounds
             else:
@@ -1099,15 +1108,10 @@ def get_simulation_profiles_realtime(simulation_id: str):
             # 获取文件修改时间
             file_stat = os.stat(profiles_file)
             file_modified_at = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
-            
+
             try:
-                if platform == "reddit":
-                    with open(profiles_file, 'r', encoding='utf-8') as f:
-                        profiles = json.load(f)
-                else:
-                    with open(profiles_file, 'r', encoding='utf-8') as f:
-                        reader = csv.DictReader(f)
-                        profiles = list(reader)
+                manager = SimulationManager()
+                profiles = manager.get_profiles(simulation_id, platform=platform)
             except (json.JSONDecodeError, Exception) as e:
                 logger.warning(f"读取 profiles 文件失败（可能正在写入中）: {e}")
                 profiles = []
@@ -1702,7 +1706,7 @@ def stop_simulation():
         
         return jsonify({
             "success": True,
-            "data": run_state.to_dict()
+            "data": SimulationRunner.get_public_run_state_dict(run_state)
         })
         
     except ValueError as e:
@@ -1859,7 +1863,7 @@ def get_run_status_detail(simulation_id: str):
         ) if current_round > 0 else []
         
         # 获取基础状态信息
-        result = run_state.to_dict()
+        result = SimulationRunner.get_public_run_state_dict(run_state)
         result["all_actions"] = [a.to_dict() for a in all_actions]
         result["twitter_actions"] = [a.to_dict() for a in twitter_actions]
         result["reddit_actions"] = [a.to_dict() for a in reddit_actions]

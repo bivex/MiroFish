@@ -460,6 +460,75 @@ def test_read_action_log_marks_platform_completed_without_finishing_live_runner(
     assert sum("所有平台模拟已完成" in msg for msg in messages) == 1
 
 
+def test_get_public_run_state_dict_marks_waiting_completed_for_read_path(tmp_path):
+    module = load_simulation_runner_module()
+    runner = module.SimulationRunner
+    runner.RUN_STATE_DIR = str(tmp_path)
+    runner._run_states.clear()
+    runner._processes.clear()
+
+    sim_dir = tmp_path / "sim_waiting_completed"
+    twitter_dir = sim_dir / "twitter"
+    twitter_dir.mkdir(parents=True)
+    (twitter_dir / "actions.jsonl").write_text(json.dumps({
+        "event_type": "simulation_end",
+        "platform": "twitter",
+        "total_rounds": 12,
+        "total_actions": 18,
+    }) + "\n", encoding="utf-8")
+
+    state = module.SimulationRunState(
+        simulation_id="sim_waiting_completed",
+        runner_status=module.RunnerStatus.RUNNING,
+        process_pid=424242,
+        current_round=12,
+        total_rounds=12,
+        twitter_running=False,
+        reddit_running=False,
+        twitter_completed=True,
+        twitter_actions_count=18,
+    )
+
+    payload = runner.get_public_run_state_dict(state)
+
+    assert payload is not None
+    assert payload["runner_status"] == "completed"
+    assert payload["completed_at"] == state.updated_at
+    assert state.runner_status == module.RunnerStatus.RUNNING
+    assert state.process_pid == 424242
+
+
+def test_get_public_run_state_dict_keeps_running_while_platform_loop_still_active(tmp_path):
+    module = load_simulation_runner_module()
+    runner = module.SimulationRunner
+    runner.RUN_STATE_DIR = str(tmp_path)
+    runner._run_states.clear()
+    runner._processes.clear()
+
+    sim_dir = tmp_path / "sim_still_running"
+    twitter_dir = sim_dir / "twitter"
+    twitter_dir.mkdir(parents=True)
+    (twitter_dir / "actions.jsonl").write_text("", encoding="utf-8")
+
+    state = module.SimulationRunState(
+        simulation_id="sim_still_running",
+        runner_status=module.RunnerStatus.RUNNING,
+        process_pid=515151,
+        current_round=3,
+        total_rounds=12,
+        twitter_running=True,
+        reddit_running=False,
+        twitter_completed=False,
+        twitter_actions_count=4,
+    )
+
+    payload = runner.get_public_run_state_dict(state)
+
+    assert payload is not None
+    assert payload["runner_status"] == "running"
+    assert payload["completed_at"] is None
+
+
 def test_start_simulation_coerces_parallel_to_single_enabled_platform(tmp_path):
     module = load_simulation_runner_module()
     runner = module.SimulationRunner

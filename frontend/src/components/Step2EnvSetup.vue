@@ -782,6 +782,9 @@ const startPrepareSimulation = async () => {
   try {
     const res = await prepareSimulation({
       simulation_id: props.simulationId,
+      entity_types: props.projectData?.recommended_prepare_entity_types?.length
+        ? props.projectData.recommended_prepare_entity_types
+        : undefined,
       use_llm_for_profiles: true,
       parallel_profile_count: 5
     })

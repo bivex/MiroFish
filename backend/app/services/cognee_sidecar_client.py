@@ -6,11 +6,14 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Dict, List
 
 
 SENTINEL = "__MIROFISH_COGNEE_JSON__"
+_GRAPH_LOCKS: Dict[str, threading.Lock] = {}
+_GRAPH_LOCKS_GUARD = threading.Lock()
 
 
 class CogneeSidecarClient:
@@ -33,6 +36,14 @@ class CogneeSidecarClient:
         workspace.mkdir(parents=True, exist_ok=True)
         return workspace
 
+    def _get_graph_lock(self, graph_id: str) -> threading.Lock:
+        with _GRAPH_LOCKS_GUARD:
+            lock = _GRAPH_LOCKS.get(graph_id)
+            if lock is None:
+                lock = threading.Lock()
+                _GRAPH_LOCKS[graph_id] = lock
+            return lock
+
     def _run(self, operation: str, graph_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.sidecar_python.exists():
             raise FileNotFoundError(f"Cognee sidecar python not found: {self.sidecar_python}")
@@ -43,15 +54,16 @@ class CogneeSidecarClient:
         env = os.environ.copy()
         env.setdefault("ENABLE_BACKEND_ACCESS_CONTROL", "false")
 
-        result = subprocess.run(
-            [str(self.sidecar_python), str(self.sidecar_script), operation],
-            input=json.dumps(payload, ensure_ascii=False),
-            text=True,
-            capture_output=True,
-            cwd=workspace,
-            env=env,
-            check=False,
-        )
+        with self._get_graph_lock(graph_id):
+            result = subprocess.run(
+                [str(self.sidecar_python), str(self.sidecar_script), operation],
+                input=json.dumps(payload, ensure_ascii=False),
+                text=True,
+                capture_output=True,
+                cwd=workspace,
+                env=env,
+                check=False,
+            )
 
         raw_output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
         payload_line = None
@@ -68,6 +80,29 @@ class CogneeSidecarClient:
             raise RuntimeError(parsed.get("error") or raw_output.strip())
 
         return parsed["data"]
+
+    def _runtime_payload(
+        self,
+        *,
+        llm_api_key: str | None = None,
+        llm_endpoint: str | None = None,
+        llm_model: str | None = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"llm_provider": "openai"}
+        resolved_api_key = llm_api_key if llm_api_key is not None else os.environ.get("LLM_API_KEY")
+        resolved_endpoint = llm_endpoint if llm_endpoint is not None else os.environ.get("LLM_BASE_URL")
+        resolved_model = llm_model if llm_model is not None else (
+            os.environ.get("REPORT_LLM_MODEL") or os.environ.get("LLM_MODEL_NAME")
+        )
+
+        if resolved_api_key:
+            payload["llm_api_key"] = resolved_api_key
+        if resolved_endpoint:
+            payload["llm_endpoint"] = resolved_endpoint
+        if resolved_model:
+            payload["llm_model"] = resolved_model
+
+        return payload
 
     def build_graph(
         self,
@@ -86,24 +121,64 @@ class CogneeSidecarClient:
                 "dataset_name": graph_id,
                 "graph_name": graph_name,
                 "texts": texts,
-                "llm_api_key": llm_api_key,
-                "llm_endpoint": llm_endpoint,
-                "llm_model": llm_model,
-                "llm_provider": "openai",
+                **self._runtime_payload(
+                    llm_api_key=llm_api_key,
+                    llm_endpoint=llm_endpoint,
+                    llm_model=llm_model,
+                ),
             },
         )
 
-    def get_graph_data(self, graph_id: str) -> Dict[str, Any]:
-        return self._run("get_graph_data", graph_id, {"graph_id": graph_id, "dataset_name": graph_id})
+    def get_graph_data(
+        self,
+        graph_id: str,
+        *,
+        llm_api_key: str | None = None,
+        llm_endpoint: str | None = None,
+        llm_model: str | None = None,
+    ) -> Dict[str, Any]:
+        return self._run(
+            "get_graph_data",
+            graph_id,
+            {
+                "graph_id": graph_id,
+                "dataset_name": graph_id,
+                **self._runtime_payload(
+                    llm_api_key=llm_api_key,
+                    llm_endpoint=llm_endpoint,
+                    llm_model=llm_model,
+                ),
+            },
+        )
 
-    def search_graph(self, graph_id: str, query: str, limit: int = 10) -> Dict[str, Any]:
+    def search_graph(
+        self,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+        *,
+        llm_api_key: str | None = None,
+        llm_endpoint: str | None = None,
+        llm_model: str | None = None,
+    ) -> Dict[str, Any]:
         return self._run(
             "search_graph",
             graph_id,
-            {"graph_id": graph_id, "dataset_name": graph_id, "query": query, "limit": limit},
+            {
+                "graph_id": graph_id,
+                "dataset_name": graph_id,
+                "query": query,
+                "limit": limit,
+                **self._runtime_payload(
+                    llm_api_key=llm_api_key,
+                    llm_endpoint=llm_endpoint,
+                    llm_model=llm_model,
+                ),
+            },
         )
 
     def delete_graph(self, graph_id: str) -> None:
-        workspace = self.get_workspace_dir(graph_id)
-        if workspace.exists():
-            shutil.rmtree(workspace)
+        with self._get_graph_lock(graph_id):
+            workspace = self.get_workspace_dir(graph_id)
+            if workspace.exists():
+                shutil.rmtree(workspace)
