@@ -878,6 +878,10 @@ const loadReportData = async () => {
     // Get report info
     const reportRes = await getReport(props.reportId)
     if (reportRes.success && reportRes.data) {
+      if (reportRes.data.outline) {
+        reportOutline.value = reportRes.data.outline
+      }
+
       // Load agent logs to get report outline and sections
       await loadAgentLogs()
     }
@@ -895,7 +899,7 @@ const loadAgentLogs = async () => {
       const logs = res.data.logs || []
       
       logs.forEach(log => {
-        if (log.action === 'planning_complete' && log.details?.outline) {
+        if (log.action === 'planning_complete' && log.details?.outline && !reportOutline.value) {
           reportOutline.value = log.details.outline
         }
         

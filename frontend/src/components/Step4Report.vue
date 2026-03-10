@@ -2080,7 +2080,7 @@ const fetchReportDetail = async ({ allowIncomplete = false } = {}) => {
       reportDetailLoaded.value = true
       reportDetailError.value = ''
 
-      if (!reportOutline.value && res.data.outline) {
+      if (res.data.outline) {
         reportOutline.value = res.data.outline
       }
 
@@ -2332,7 +2332,7 @@ const fetchAgentLog = async () => {
         newLogs.forEach(log => {
           agentLogs.value.push(log)
           
-          if (log.action === 'planning_complete' && log.details?.outline) {
+          if (log.action === 'planning_complete' && log.details?.outline && !reportOutline.value) {
             reportOutline.value = log.details.outline
           }
           
