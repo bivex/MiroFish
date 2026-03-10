@@ -204,7 +204,7 @@
             </template>
 
             <div v-else class="writeback-empty">
-              No write-back summary was persisted for this report.
+              {{ writebackEmptyMessage }}
             </div>
           </div>
 
@@ -512,6 +512,8 @@ const showRawResult = reactive({})
 const reportDetail = ref(null)
 const reportDetailLoaded = ref(false)
 const reportDetailError = ref('')
+const reportDetailPollAttempts = ref(0)
+const MAX_WRITEBACK_DETAIL_POLL_ATTEMPTS = 10
 
 // Toggle functions
 const toggleRawResult = (timestamp, event) => {
@@ -1898,6 +1900,10 @@ const writebackResult = computed(() => {
   return reportDetail.value?.writeback_result || null
 })
 
+const hasWritebackField = computed(() => {
+  return !!reportDetail.value && Object.prototype.hasOwnProperty.call(reportDetail.value, 'writeback_result')
+})
+
 const autoPromoteSummary = computed(() => {
   return writebackResult.value?.auto_promote || null
 })
@@ -1923,11 +1929,22 @@ const writebackStatusClass = computed(() => {
 
 const writebackStatusText = computed(() => {
   const writeback = writebackResult.value
+  if (reportDetailLoaded.value && reportDetail.value && !hasWritebackField.value) return 'Backend restart required'
   if (!writeback) return reportDetailLoaded.value ? 'Unavailable' : 'Loading'
   if (writeback.ok) return 'Synced'
   if (writeback.enabled === false) return 'Disabled'
   if (writeback.skipped) return 'Skipped'
   return 'Failed'
+})
+
+const writebackEmptyMessage = computed(() => {
+  if (reportDetailLoaded.value && reportDetail.value && !hasWritebackField.value) {
+    return 'This backend instance does not expose persisted write-back summaries yet. Restart MiroFish backend on the latest code, then rerun the report.'
+  }
+  if (isComplete.value && hasWritebackField.value && !writebackResult.value && reportDetailPollAttempts.value > 0 && reportDetailPollAttempts.value < MAX_WRITEBACK_DETAIL_POLL_ATTEMPTS) {
+    return 'Waiting for persisted write-back summary to land...'
+  }
+  return 'No write-back summary was persisted for this report.'
 })
 
 const writebackRunLabel = computed(() => {
@@ -2086,6 +2103,31 @@ const fetchReportDetail = async ({ allowIncomplete = false } = {}) => {
     }
     console.warn('Failed to fetch report detail:', err)
   }
+}
+
+let reportDetailTimer = null
+
+const stopReportDetailPolling = () => {
+  if (reportDetailTimer) {
+    clearTimeout(reportDetailTimer)
+    reportDetailTimer = null
+  }
+}
+
+const scheduleWritebackDetailPolling = () => {
+  stopReportDetailPolling()
+
+  if (!props.reportId || !isComplete.value) return
+  if (writebackResult.value) return
+  if (reportDetailError.value) return
+  if (reportDetail.value && !hasWritebackField.value) return
+  if (reportDetailPollAttempts.value >= MAX_WRITEBACK_DETAIL_POLL_ATTEMPTS) return
+
+  reportDetailTimer = setTimeout(async () => {
+    reportDetailPollAttempts.value += 1
+    await fetchReportDetail({ allowIncomplete: true })
+    scheduleWritebackDetailPolling()
+  }, 1500)
 }
 
 const isSectionCompleted = (sectionIndex) => {
@@ -2313,7 +2355,9 @@ const fetchAgentLog = async () => {
             currentSectionIndex.value = null  // 确保清除 loading 状态
             emit('update-status', 'completed')
             stopPolling()
-            void fetchReportDetail()
+            void fetchReportDetail({ allowIncomplete: true }).finally(() => {
+              scheduleWritebackDetailPolling()
+            })
             // 滚动逻辑统一在循环结束后的 nextTick 中处理
           }
           
@@ -2442,6 +2486,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopPolling()
+  stopReportDetailPolling()
 })
 
 watch(() => props.reportId, (newId) => {
@@ -2461,6 +2506,8 @@ watch(() => props.reportId, (newId) => {
     reportDetail.value = null
     reportDetailLoaded.value = false
     reportDetailError.value = ''
+    reportDetailPollAttempts.value = 0
+    stopReportDetailPolling()
     
     void fetchReportDetail({ allowIncomplete: true })
     startPolling()
