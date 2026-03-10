@@ -1420,4 +1420,74 @@ input:checked + .slider:before {
   padding: 3px 6px;
   font-size: 9px;
 }
+
+@media (max-width: 1024px) {
+  .panel-header {
+    padding: 14px 16px;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .header-tools {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .graph-legend {
+    left: 16px;
+    bottom: 16px;
+    max-width: min(320px, calc(100% - 32px));
+  }
+
+  .edge-labels-toggle {
+    right: 16px;
+    top: auto;
+    bottom: 16px;
+  }
+
+  .detail-panel {
+    top: 72px;
+    right: 16px;
+    width: min(320px, calc(100% - 32px));
+    max-height: calc(100% - 96px);
+  }
+}
+
+@media (max-width: 640px) {
+  .panel-header {
+    padding: 12px;
+  }
+
+  .tool-btn {
+    height: 30px;
+    padding: 0 10px;
+  }
+
+  .tool-btn .btn-text {
+    display: none;
+  }
+
+  .graph-legend {
+    display: none;
+  }
+
+  .edge-labels-toggle {
+    right: 12px;
+    bottom: 12px;
+    padding: 6px 10px;
+  }
+
+  .toggle-label {
+    font-size: 11px;
+  }
+
+  .detail-panel {
+    top: 64px;
+    right: 12px;
+    width: calc(100% - 24px);
+    max-height: calc(100% - 76px);
+  }
+}
 </style>

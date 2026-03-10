@@ -2602,4 +2602,76 @@ onUnmounted(() => {
   transform: scale(0.95) translateY(10px);
   opacity: 0;
 }
+
+@media (max-width: 1024px) {
+  .scroll-container {
+    padding: 16px;
+  }
+
+  .card-header,
+  .preview-header,
+  .section-header {
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .action-group {
+    flex-direction: column;
+  }
+
+  .action-group.dual {
+    grid-template-columns: 1fr;
+  }
+
+  .action-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .stats-grid,
+  .config-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .info-row,
+  .period-item {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 6px;
+  }
+}
+
+@media (max-width: 640px) {
+  .scroll-container {
+    padding: 12px;
+    gap: 16px;
+  }
+
+  .step-card {
+    padding: 16px;
+  }
+
+  .step-info {
+    align-items: flex-start;
+  }
+
+  .step-num {
+    font-size: 16px;
+  }
+
+  .stats-grid,
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .section-title {
+    font-size: 13px;
+  }
+
+  .section-desc,
+  .description {
+    font-size: 11px;
+  }
+}
 </style>

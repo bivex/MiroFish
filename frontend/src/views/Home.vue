@@ -332,12 +332,14 @@ const startSimulation = () => {
 
 /* 顶部导航 */
 .navbar {
-  height: 60px;
+  min-height: 60px;
   background: var(--black);
   color: var(--white);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px 20px;
+  flex-wrap: wrap;
   padding: 0 40px;
 }
 
@@ -377,13 +379,15 @@ const startSimulation = () => {
 .main-content {
   max-width: 1400px;
   margin: 0 auto;
-  padding: 60px 40px;
+  padding: 48px clamp(20px, 4vw, 40px) 60px;
 }
 
 /* Hero 区域 */
 .hero-section {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
+  gap: 40px;
   margin-bottom: 80px;
   position: relative;
 }
@@ -396,6 +400,7 @@ const startSimulation = () => {
 .tag-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 15px;
   margin-bottom: 25px;
   font-family: var(--font-mono);
@@ -418,11 +423,11 @@ const startSimulation = () => {
 }
 
 .main-title {
-  font-size: 4.5rem;
+  font-size: clamp(2.8rem, 7vw, 4.5rem);
   line-height: 1.2;
   font-weight: 500;
   margin: 0 0 40px 0;
-  letter-spacing: -2px;
+  letter-spacing: clamp(-1px, -0.2vw, -2px);
   color: var(--black);
 }
 
@@ -434,7 +439,7 @@ const startSimulation = () => {
 }
 
 .hero-desc {
-  font-size: 1.05rem;
+  font-size: clamp(0.98rem, 1.4vw, 1.05rem);
   line-height: 1.8;
   color: var(--gray-text);
   max-width: 640px;
@@ -501,6 +506,7 @@ const startSimulation = () => {
   flex-direction: column;
   justify-content: space-between;
   align-items: flex-end;
+  width: 100%;
 }
 
 .logo-container {
@@ -536,7 +542,7 @@ const startSimulation = () => {
 /* Dashboard 双栏布局 */
 .dashboard-section {
   display: flex;
-  gap: 60px;
+  gap: clamp(28px, 4vw, 60px);
   border-top: 1px solid var(--border);
   padding-top: 60px;
   align-items: flex-start;
@@ -582,6 +588,7 @@ const startSimulation = () => {
 
 .metrics-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 20px;
   margin-bottom: 15px;
 }
@@ -590,6 +597,7 @@ const startSimulation = () => {
   border: 1px solid var(--border);
   padding: 20px 30px;
   min-width: 150px;
+  flex: 1 1 220px;
 }
 
 .metric-value {
@@ -681,6 +689,8 @@ const startSimulation = () => {
 .console-header {
   display: flex;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-bottom: 15px;
   font-family: var(--font-mono);
   font-size: 0.75rem;
@@ -689,7 +699,7 @@ const startSimulation = () => {
 
 .upload-zone {
   border: 1px dashed #CCC;
-  height: 200px;
+  min-height: 200px;
   overflow-y: auto;
   display: flex;
   align-items: center;
@@ -746,6 +756,7 @@ const startSimulation = () => {
 .file-item {
   display: flex;
   align-items: center;
+  gap: 8px;
   background: var(--white);
   padding: 8px 12px;
   border: 1px solid #EEE;
@@ -755,7 +766,11 @@ const startSimulation = () => {
 
 .file-name {
   flex: 1;
+  min-width: 0;
   margin: 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .remove-btn {
@@ -868,6 +883,16 @@ const startSimulation = () => {
 }
 
 /* 响应式适配 */
+@media (max-width: 1280px) {
+  .hero-logo {
+    max-width: 360px;
+  }
+
+  .logo-container {
+    padding-right: 0;
+  }
+}
+
 @media (max-width: 1024px) {
   .dashboard-section {
     flex-direction: column;
@@ -881,10 +906,111 @@ const startSimulation = () => {
     padding-right: 0;
     margin-bottom: 40px;
   }
+
+  .hero-right {
+    align-items: flex-start;
+    gap: 24px;
+  }
+
+  .logo-container {
+    justify-content: flex-start;
+  }
   
   .hero-logo {
-    max-width: 200px;
+    max-width: 280px;
     margin-bottom: 20px;
+  }
+
+  .scroll-down-btn {
+    align-self: flex-start;
+  }
+
+  .left-panel,
+  .right-panel {
+    width: 100%;
+  }
+}
+
+@media (max-width: 768px) {
+  .navbar {
+    padding: 14px 20px;
+  }
+
+  .github-link {
+    font-size: 0.8rem;
+  }
+
+  .main-content {
+    padding: 32px 20px 48px;
+  }
+
+  .hero-section {
+    margin-bottom: 56px;
+  }
+
+  .hero-desc {
+    margin-bottom: 32px;
+    text-align: left;
+  }
+
+  .slogan-text {
+    font-size: 1rem;
+  }
+
+  .steps-container,
+  .console-section {
+    padding: 20px;
+  }
+
+  .metric-card {
+    padding: 16px 20px;
+  }
+
+  .metric-value {
+    font-size: 1.4rem;
+  }
+
+  .workflow-item {
+    gap: 14px;
+  }
+
+  .upload-zone {
+    min-height: 180px;
+  }
+
+  .code-input {
+    padding: 16px;
+    font-size: 0.85rem;
+  }
+
+  .model-badge {
+    position: static;
+    display: inline-flex;
+    padding: 0 16px 14px;
+  }
+
+  .start-engine-btn {
+    padding: 16px;
+    font-size: 1rem;
+  }
+}
+
+@media (max-width: 560px) {
+  .navbar {
+    justify-content: flex-start;
+  }
+
+  .main-title {
+    margin-bottom: 24px;
+  }
+
+  .workflow-item {
+    gap: 10px;
+  }
+
+  .file-item {
+    padding: 8px 10px;
+    font-size: 0.75rem;
   }
 }
 </style>

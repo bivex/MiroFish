@@ -216,6 +216,7 @@ onMounted(() => {
 <style scoped>
 .main-view {
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   background: #FFF;
@@ -346,5 +347,79 @@ onMounted(() => {
 
 .panel-wrapper.left {
   border-right: 1px solid #EAEAEA;
+}
+
+@media (max-width: 1024px) {
+  .main-view {
+    height: auto;
+    min-height: 100dvh;
+    overflow: auto;
+  }
+
+  .app-header {
+    height: auto;
+    min-height: 60px;
+    padding: 14px 16px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .header-center {
+    display: none;
+  }
+
+  .header-right {
+    margin-left: auto;
+    gap: 12px;
+  }
+
+  .content-area {
+    flex-direction: column;
+    overflow: visible;
+  }
+
+  .panel-wrapper {
+    width: 100% !important;
+    height: auto;
+    min-height: 45vh;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .panel-wrapper.left {
+    border-right: none;
+    border-bottom: 1px solid #EAEAEA;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-header {
+    align-items: flex-start;
+  }
+
+  .header-right {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
+  .workflow-step {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    font-size: 12px;
+  }
+
+  .step-divider {
+    display: none;
+  }
+
+  .status-indicator {
+    font-size: 11px;
+  }
+
+  .panel-wrapper {
+    min-height: 50vh;
+  }
 }
 </style>

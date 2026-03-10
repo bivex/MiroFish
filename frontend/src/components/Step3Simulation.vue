@@ -1261,4 +1261,94 @@ onUnmounted(() => {
   animation: spin 0.8s linear infinite;
   margin-right: 6px;
 }
+
+@media (max-width: 1024px) {
+  .control-bar {
+    height: auto;
+    padding: 12px 16px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .status-group {
+    flex-wrap: wrap;
+  }
+
+  .platform-status {
+    flex: 1 1 220px;
+    min-width: calc(50% - 6px);
+  }
+
+  .action-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .timeline-header {
+    padding: 12px 16px;
+  }
+
+  .timeline-stats {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .timeline-feed {
+    padding: 20px 16px;
+  }
+}
+
+@media (max-width: 768px) {
+  .platform-status {
+    min-width: 100%;
+  }
+
+  .actions-tooltip {
+    display: none;
+  }
+
+  .timeline-axis {
+    left: 20px;
+    transform: none;
+  }
+
+  .timeline-marker {
+    left: 20px;
+    transform: translateX(-50%);
+  }
+
+  .timeline-item,
+  .timeline-item.twitter,
+  .timeline-item.reddit {
+    justify-content: flex-start;
+    padding-left: 44px;
+    padding-right: 0;
+  }
+
+  .timeline-card,
+  .timeline-item.twitter .timeline-card,
+  .timeline-item.reddit .timeline-card {
+    width: 100%;
+    margin: 0;
+  }
+
+  .card-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .header-meta {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .system-logs {
+    padding: 12px;
+  }
+
+  .log-content {
+    height: 84px;
+  }
+}
 </style>
