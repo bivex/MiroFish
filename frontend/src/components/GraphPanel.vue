@@ -4,19 +4,25 @@
       <span class="panel-title">Graph Relationship Visualization</span>
       <!-- 顶部工具栏 (Internal Top Right) -->
       <div class="header-tools">
-        <button class="tool-btn" @click="$emit('refresh')" :disabled="loading" title="Refresh graph">
+        <button class="tool-btn" @click="$emit('refresh')" :disabled="loading || isGraphTemporarilyDisabled" title="Refresh graph">
           <span class="icon-refresh" :class="{ 'spinning': loading }">↻</span>
           <span class="btn-text">Refresh</span>
         </button>
-        <button class="tool-btn" @click="$emit('toggle-maximize')" title="Maximize / restore">
+        <button class="tool-btn" @click="$emit('toggle-maximize')" :disabled="isGraphTemporarilyDisabled" title="Maximize / restore">
           <span class="icon-maximize">⛶</span>
         </button>
       </div>
     </div>
     
     <div class="graph-container" ref="graphContainer">
+      <div v-if="isGraphTemporarilyDisabled" class="graph-state graph-state--disabled">
+        <div class="empty-icon">⏸</div>
+        <p class="empty-text">Graph visualization is temporarily disabled on the frontend.</p>
+        <p class="empty-hint">Report and simulation workflows remain available while the graph panel is paused.</p>
+      </div>
+
       <!-- 图谱可视化 -->
-      <div v-if="hasRenderableGraph" class="graph-view">
+      <div v-else-if="hasRenderableGraph" class="graph-view">
         <svg ref="graphSvg" class="graph-svg"></svg>
         
         <!-- 构建中/模拟中提示 -->
@@ -264,8 +270,10 @@ const showEdgeLabels = ref(true) // 默认显示边标签
 const expandedSelfLoops = ref(new Set()) // 展开的自环项
 const showSimulationFinishedHint = ref(false) // 模拟结束后的提示
 const wasSimulating = ref(false) // 追踪之前是否在模拟中
+const GRAPH_UI_TEMPORARILY_DISABLED = true
 
-const hasRenderableGraph = computed(() => Array.isArray(props.graphData?.nodes) && props.graphData.nodes.length > 0)
+const isGraphTemporarilyDisabled = computed(() => GRAPH_UI_TEMPORARILY_DISABLED)
+const hasRenderableGraph = computed(() => !isGraphTemporarilyDisabled.value && Array.isArray(props.graphData?.nodes) && props.graphData.nodes.length > 0)
 
 // 关闭模拟结束提示
 const dismissFinishedHint = () => {
@@ -337,6 +345,7 @@ let linkLabelsRef = null
 let linkLabelBgRef = null
 
 const renderGraph = () => {
+  if (isGraphTemporarilyDisabled.value) return
   if (!graphSvg.value || !props.graphData) return
   
   // 停止之前的仿真
