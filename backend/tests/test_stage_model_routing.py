@@ -64,6 +64,8 @@ def test_active_prompt_layers_use_english_llm_contracts():
                 "You are an expert knowledge-graph ontology designer.",
                 "## Simulation Requirement",
                 '"analysis_summary": "Brief English analysis summary of the source text"',
+                "prefer broad reusable ontology anchors over overly narrow title/profession classes",
+                "Prefer `Character` over types like `Queen`, `Prince`, or `Alchemist`",
             ],
             "must_not_have": [
                 "请根据以上内容，设计适合情景推演与社会投影模拟的实体类型和关系类型。",

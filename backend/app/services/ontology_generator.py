@@ -4,6 +4,7 @@
 """
 
 import json
+import re
 from typing import Dict, Any, List, Optional
 from ..utils.llm_client import LLMClient
 from ..config import Config
@@ -23,6 +24,8 @@ We are building a simulation system grounded in worldbuilding and scenario logic
 
 Therefore, entity types should prioritize subjects that can be projected as actors, organizations, or representative channels.
 
+When the material is narrative, fantasy, historical-fiction, or lore-heavy, prefer broad reusable ontology anchors over overly narrow title/profession classes.
+
 ## What can count as an entity type
 - specific people such as participants, leaders, scholars, journalists, knights, priests, merchants, explorers, and similar roles
 - organizations such as universities, royal courts, religious orders, guilds, legions, companies, media outlets, councils, academies, and similar bodies
@@ -34,6 +37,13 @@ Therefore, entity types should prioritize subjects that can be projected as acto
 - topics such as academic integrity, education reform, or resource crisis
 - positions such as supporters or opponents
 - pure background elements that cannot be mapped to an acting subject or representative channel
+
+For narrative/lore settings, also avoid these failure modes unless the source strongly justifies them as stable reusable classes:
+- do not make top-level entity types that are only specific ranks or titles such as `Queen`, `Prince`, `Captain`, or `Archbishop`
+- do not make top-level entity types that are only professions such as `Alchemist`, `Blacksmith`, or `Merchant`
+- instead prefer broader classes such as `Character`, `Faction`, `Location`, `Kingdom`, `Court`, `Guild`, `Artifact`, `Institution`, or `Rumor` when grounded in the source
+- treat ranks, titles, professions, bloodlines, and social roles as attributes or subtype hints whenever possible
+- only use metaphysical or cosmic types such as `Void`, `Fate`, or `Chaos` if they behave like concrete places, forces, beings, or objects in the world rather than abstract themes
 
 ## Output format
 
@@ -90,6 +100,9 @@ Specific-type principles:
 - identify high-frequency or high-importance role categories from the text
 - each specific type should have a clear boundary and avoid unnecessary overlap
 - the description should clearly distinguish the type from its fallback category
+- for narrative/lore source material, favor reusable worldbuilding classes over one-off title buckets
+- prefer `Character` over narrow person-title classes unless the title defines a durable institution-level category
+- prefer `Court`, `Guild`, `Faction`, `Kingdom`, or `Institution` over specific named bodies when a broader class is sufficient
 
 ### 2. Relationship type design
 
@@ -144,7 +157,41 @@ Fallback organization-like type:
 - OPPOSES
 - COLLABORATES_WITH
 - COMPETES_WITH
+
+## Narrative/lore-friendly anchors
+
+When the source text is clearly narrative or fantasy, strong candidate entity types often include:
+- Character
+- Faction
+- Location
+- Kingdom
+- Court
+- Guild
+- Artifact
+- Rumor
+
+In those settings, strong candidate relationship types often include:
+- RULES
+- LEADS
+- MEMBER_OF
+- ALLIED_WITH
+- RIVAL_OF
+- RESIDES_IN
+- POSSESSES
+- SEEKS
+- SPREADS
+- KNOWS_ABOUT
 """
+
+
+NARRATIVE_CONTEXT_RE = re.compile(
+    r"\b("
+    r"narrative|story|lore|chapter|act|scene|character|quest|king|queen|prince|princess|"
+    r"kingdom|realm|court|guild|faction|throne|succession|artifact|relic|magic|mage|"
+    r"wizard|witch|alchemist|prophecy|curse|void|empire|clan|temple|oracle|rumor"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 class OntologyGenerator:
@@ -232,6 +279,12 @@ class OntologyGenerator:
 
 {additional_context}
 """
+
+        narrative_context = self._looks_like_narrative_context(
+            combined_text=combined_text,
+            simulation_requirement=simulation_requirement,
+            additional_context=additional_context,
+        )
         
         message += """
 Design entity types and relationship types suitable for scenario simulation and social projection.
@@ -245,8 +298,33 @@ Rules you must follow:
 6. Do not turn abstract concepts, pure topics, or pure emotions into entity types
 7. Do not use reserved attribute names like name, uuid, or group_id; prefer names such as full_name or org_name instead
 """
+
+        if narrative_context:
+            message += """
+
+Additional guidance for this source material:
+8. This source appears narrative/lore-heavy, so prefer broad reusable worldbuilding classes over narrow title or profession buckets
+9. Prefer `Character` over types like `Queen`, `Prince`, or `Alchemist` unless the narrower class is clearly a durable ontology category across the whole world
+10. Prefer grounded lore anchors such as `Faction`, `Location`, `Kingdom`, `Court`, `Guild`, `Artifact`, or `Rumor` when supported by the source
+11. Treat ranks, titles, professions, and bloodlines as attributes whenever possible instead of making each one a top-level entity type
+12. Only use metaphysical types like `Void` if the source treats them as concrete world entities, places, or forces rather than abstract themes
+"""
         
         return message
+
+    def _looks_like_narrative_context(
+        self,
+        *,
+        combined_text: str,
+        simulation_requirement: str,
+        additional_context: Optional[str],
+    ) -> bool:
+        combined = "\n".join([
+            str(simulation_requirement or ""),
+            str(additional_context or ""),
+            str(combined_text or ""),
+        ])
+        return bool(NARRATIVE_CONTEXT_RE.search(combined))
     
     def _validate_and_process(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """验证和后处理结果"""
