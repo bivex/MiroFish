@@ -12,9 +12,44 @@
 
     <!-- 标题区域 -->
     <div class="section-header">
-      <div class="section-line"></div>
-      <span class="section-title">Run History</span>
-      <div class="section-line"></div>
+      <div class="section-copy">
+        <div class="section-kicker">Archive</div>
+        <div class="section-title-row">
+          <span class="section-title">Run History</span>
+          <div class="section-line"></div>
+        </div>
+        <p class="section-subtitle">
+          Review past prompts, attached files, and replayable checkpoints from recent runs.
+        </p>
+      </div>
+
+      <div class="section-tools">
+        <div v-if="projects.length > 0 && !loading" class="section-updated">
+          Latest run · {{ formatDate(projects[0]?.created_at) }} {{ formatTime(projects[0]?.created_at) }}
+        </div>
+        <button class="refresh-button" type="button" @click="loadHistory" :disabled="loading">
+          {{ loading ? 'Refreshing…' : 'Refresh' }}
+        </button>
+      </div>
+    </div>
+
+    <div v-if="projects.length > 0 && !loading" class="history-stats">
+      <div class="stat-chip">
+        <span class="stat-value">{{ historySummary.totalRuns }}</span>
+        <span class="stat-label">total runs</span>
+      </div>
+      <div class="stat-chip">
+        <span class="stat-value">{{ historySummary.completedRuns }}</span>
+        <span class="stat-label">completed</span>
+      </div>
+      <div class="stat-chip">
+        <span class="stat-value">{{ historySummary.inProgressRuns }}</span>
+        <span class="stat-label">active</span>
+      </div>
+      <div class="stat-chip">
+        <span class="stat-value">{{ historySummary.totalFiles }}</span>
+        <span class="stat-label">files indexed</span>
+      </div>
     </div>
 
     <!-- 卡片容器（只在有项目时显示） -->
@@ -23,15 +58,23 @@
         v-for="(project, index) in projects" 
         :key="project.simulation_id"
         class="project-card"
-        :class="{ expanded: isExpanded, hovering: hoveringCard === index }"
+        :class="{ expanded: isExpanded, hovering: hoveringCard === index, 'latest-card': index === 0 }"
         :style="getCardStyle(index)"
         @mouseenter="hoveringCard = index"
         @mouseleave="hoveringCard = null"
         @click="navigateToProject(project)"
+        @keydown.enter.prevent="navigateToProject(project)"
+        @keydown.space.prevent="navigateToProject(project)"
+        tabindex="0"
+        role="button"
+        :aria-label="`Open run history for ${getSimulationTitle(project.simulation_requirement)}`"
       >
         <!-- 卡片头部：simulation_id 和 功能可用状态 -->
         <div class="card-header">
-          <span class="card-id">{{ formatSimulationId(project.simulation_id) }}</span>
+          <div class="card-id-group">
+            <span class="card-id">{{ formatSimulationId(project.simulation_id) }}</span>
+            <span v-if="index === 0" class="card-badge">Latest</span>
+          </div>
           <div class="card-status-icons">
             <span 
               class="status-icon" 
@@ -48,6 +91,11 @@
               title="Analysis Report"
             >◆</span>
           </div>
+        </div>
+
+        <div class="card-meta-row">
+          <span class="card-meta-pill">{{ getFileCount(project) }} files</span>
+          <span class="card-meta-pill">{{ getReplayableStepCount(project) }}/3 replay points</span>
         </div>
 
         <!-- 文件列表区域 -->
@@ -103,6 +151,14 @@
     <div v-if="loading" class="loading-state">
       <span class="loading-spinner"></span>
       <span class="loading-text">Loading...</span>
+    </div>
+
+    <div v-else-if="projects.length === 0" class="empty-state">
+      <span class="empty-icon">◌</span>
+      <h3 class="empty-title">No runs yet</h3>
+      <p class="empty-desc">
+        Launch your first simulation and completed runs will appear here for quick review and replay.
+      </p>
     </div>
 
     <!-- 历史回放详情弹窗 -->
@@ -236,6 +292,20 @@ const containerStyle = computed(() => {
   return { minHeight: `${expandedHeight}px` }
 })
 
+const historySummary = computed(() => {
+  const totalRuns = projects.value.length
+  const completedRuns = projects.value.filter((project) => getProgressClass(project) === 'completed').length
+  const inProgressRuns = projects.value.filter((project) => getProgressClass(project) === 'in-progress').length
+  const totalFiles = projects.value.reduce((sum, project) => sum + getFileCount(project), 0)
+
+  return {
+    totalRuns,
+    completedRuns,
+    inProgressRuns,
+    totalFiles
+  }
+})
+
 // 获取卡片样式
 const getCardStyle = (index) => {
   const total = projects.value.length
@@ -355,6 +425,20 @@ const formatRounds = (simulation) => {
   const total = simulation.total_rounds || 0
   if (total === 0) return 'Not started'
   return `${current}/${total} rounds`
+}
+
+const getFileCount = (project) => {
+  return Array.isArray(project?.files) ? project.files.length : 0
+}
+
+const getReplayableStepCount = (project) => {
+  let total = 0
+
+  if (project?.project_id) total += 1
+  if (project?.simulation_id) total += 1
+  if (project?.report_id) total += 1
+
+  return total
 }
 
 // 获取文件类型（用于样式）
@@ -640,26 +724,131 @@ onUnmounted(() => {
   position: relative;
   z-index: 100;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: flex-end;
+  justify-content: space-between;
   gap: 24px;
-  margin-bottom: 24px;
+  margin-bottom: 18px;
   font-family: 'JetBrains Mono', 'SF Mono', monospace;
   padding: 0 40px;
 }
 
+.section-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.section-kicker {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #9CA3AF;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.section-title-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
 .section-line {
-  flex: 1;
+  width: 180px;
   height: 1px;
   background: linear-gradient(90deg, transparent, #E5E7EB, transparent);
-  max-width: 300px;
+  max-width: 100%;
 }
 
 .section-title {
-  font-size: 0.8rem;
-  font-weight: 500;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #111827;
+  letter-spacing: 1px;
+  text-transform: none;
+}
+
+.section-subtitle {
+  margin: 0;
+  max-width: 620px;
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #6B7280;
+}
+
+.section-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.section-updated {
+  font-size: 0.68rem;
   color: #9CA3AF;
-  letter-spacing: 3px;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.refresh-button {
+  border: 1px solid #D1D5DB;
+  background: rgba(255, 255, 255, 0.92);
+  color: #111827;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.refresh-button:hover:not(:disabled) {
+  border-color: #111827;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(17, 24, 39, 0.08);
+}
+
+.refresh-button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.history-stats {
+  position: relative;
+  z-index: 100;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 0 40px;
+  margin-bottom: 20px;
+}
+
+.stat-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid #E5E7EB;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.04);
+}
+
+.stat-value {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.stat-label {
+  font-size: 0.68rem;
+  color: #6B7280;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
 }
 
@@ -680,7 +869,7 @@ onUnmounted(() => {
   width: 280px;
   background: #FFFFFF;
   border: 1px solid #E5E7EB;
-  border-radius: 0;
+  border-radius: 14px;
   padding: 14px;
   cursor: pointer;
   box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
@@ -697,6 +886,17 @@ onUnmounted(() => {
   z-index: 1000 !important;
 }
 
+.project-card.latest-card {
+  border-color: rgba(37, 99, 235, 0.22);
+  box-shadow: 0 18px 30px rgba(37, 99, 235, 0.08);
+}
+
+.project-card:focus-visible {
+  outline: none;
+  border-color: #2563EB;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18), 0 14px 24px rgba(15, 23, 42, 0.08);
+}
+
 /* 卡片头部 */
 .card-header {
   display: flex;
@@ -709,10 +909,31 @@ onUnmounted(() => {
   font-size: 0.7rem;
 }
 
+.card-id-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .card-id {
   color: #6B7280;
   letter-spacing: 0.5px;
   font-weight: 500;
+}
+
+.card-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.1);
+  color: #2563EB;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
 }
 
 /* 功能状态图标组 */
@@ -720,6 +941,31 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.card-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.card-meta-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid #E5E7EB;
+  background: #F9FAFB;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: #6B7280;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
 }
 
 .status-icon {
@@ -989,9 +1235,35 @@ onUnmounted(() => {
   color: #9CA3AF;
 }
 
+.empty-state {
+  position: relative;
+  z-index: 50;
+  border: 1px dashed #E5E7EB;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(249, 250, 251, 0.95) 100%);
+}
+
 .empty-icon {
   font-size: 2rem;
   opacity: 0.5;
+}
+
+.empty-title {
+  margin: 0;
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.empty-desc {
+  margin: 0;
+  max-width: 520px;
+  text-align: center;
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: #6B7280;
 }
 
 .loading-spinner {
@@ -1009,17 +1281,45 @@ onUnmounted(() => {
 
 /* 响应式 */
 @media (max-width: 1200px) {
+  .section-line {
+    width: 120px;
+  }
+
   .project-card {
     width: 240px;
   }
 }
 
 @media (max-width: 768px) {
+  .section-header {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 0 20px;
+  }
+
+  .section-title-row {
+    width: 100%;
+  }
+
+  .section-tools {
+    width: 100%;
+    align-items: flex-start;
+  }
+
+  .history-stats {
+    padding: 0 20px;
+  }
+
   .cards-container {
     padding: 0 20px;
   }
+
   .project-card {
     width: 200px;
+  }
+
+  .card-meta-row {
+    flex-wrap: wrap;
   }
 }
 
