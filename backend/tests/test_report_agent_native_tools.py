@@ -454,3 +454,203 @@ def test_execute_tool_payload_prefers_runtime_facts_for_cognee_tool_text():
     assert "[round 10] [twitter] Royal Court posted that the decree remains valid." in payload["text"]
     assert "WorldRule:" not in payload["text"]
     assert payload["evidence"]["meaningful"] is True
+
+
+def test_chat_returns_only_retrieved_facts_when_tool_results_exist():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def __init__(self):
+            self.responses = iter([
+                '<tool_call>{"name": "quick_search", "parameters": {"query": "Aria Harbor Guild", "limit": 5}}</tool_call>',
+                'Aria is the unquestioned ruler of the port city.',
+            ])
+
+        def chat(self, **kwargs):
+            return next(self.responses)
+
+    class ToolsStub:
+        def quick_search(self, **kwargs):
+            return types.SimpleNamespace(
+                facts=[
+                    'Actor: Aria the Captain\n- role: captain\nSocialEdge: Aria the Captain -> Harbor Guild (MEMBER_OF)',
+                ],
+                nodes=[],
+                edges=[],
+                total_count=1,
+                diagnostics={"evidence_sources": ["sidecar_search"]},
+                to_text=lambda: 'Search Results\nActor: Aria the Captain\n- role: captain\nSocialEdge: Aria the Captain -> Harbor Guild (MEMBER_OF)',
+            )
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_1",
+        simulation_requirement="Answer actor questions from retrieved memory.",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    result = agent.chat("Who is Aria?")
+
+    assert "Based only on retrieved facts:" in result["response"]
+    assert "Actor: Aria the Captain" in result["response"]
+    assert "Aria the Captain — role: captain" in result["response"]
+    assert "Relation: Aria the Captain -> Harbor Guild (MEMBER_OF)" in result["response"]
+    assert "unquestioned ruler" not in result["response"]
+
+
+def test_chat_returns_limited_fallback_when_retrieved_facts_are_sparse():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def __init__(self):
+            self.responses = iter([
+                '<tool_call>{"name": "quick_search", "parameters": {"query": "Aria Harbor Guild", "limit": 5}}</tool_call>',
+                'Aria definitely controls the guild.',
+            ])
+
+        def chat(self, **kwargs):
+            return next(self.responses)
+
+    class ToolsStub:
+        def quick_search(self, **kwargs):
+            return types.SimpleNamespace(
+                facts=["schema_version: 1.0", "world_id: mythweave"],
+                nodes=[],
+                edges=[],
+                total_count=2,
+                diagnostics={"evidence_sources": ["sidecar_search"]},
+                to_text=lambda: 'Search Results\nschema_version: 1.0\nworld_id: mythweave',
+            )
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_2",
+        simulation_requirement="Answer actor questions from retrieved memory.",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    result = agent.chat("Who is Aria?")
+
+    assert "I could not find enough verified facts" in result["response"]
+    assert "definitely controls the guild" not in result["response"]
+
+
+def test_chat_prefers_query_matching_facts_over_unrelated_runtime_lines():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def __init__(self):
+            self.responses = iter([
+                '<tool_call>{"name": "quick_search", "parameters": {"query": "Aria the Captain", "limit": 5}}</tool_call>',
+                'Aria clearly dominates the city.',
+            ])
+
+        def chat(self, **kwargs):
+            return next(self.responses)
+
+    class ToolsStub:
+        def quick_search(self, **kwargs):
+            return types.SimpleNamespace(
+                facts=[
+                    '[round 10] [twitter] city guard CREATE_POST',
+                    'Actor: Aria the Captain\n- role: captain',
+                ],
+                nodes=[],
+                edges=[],
+                total_count=2,
+                diagnostics={"evidence_sources": ["sidecar_search"]},
+                to_text=lambda: 'Search Results\n[round 10] [twitter] city guard CREATE_POST\nActor: Aria the Captain\n- role: captain',
+            )
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_4",
+        simulation_requirement="Answer actor questions from retrieved memory.",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    result = agent.chat("Who is Aria?")
+
+    assert "Actor: Aria the Captain" in result["response"]
+    assert "Aria the Captain — role: captain" in result["response"]
+    assert "city guard CREATE_POST" not in result["response"]
+
+
+def test_chat_auto_uses_quick_search_when_llm_skips_tools_for_cognee():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def chat(self, **kwargs):
+            return "Aria is probably the central authority here."
+
+    class ToolsStub:
+        def quick_search(self, **kwargs):
+            return types.SimpleNamespace(
+                facts=['Actor: Aria the Captain\n- role: captain'],
+                nodes=[],
+                edges=[],
+                total_count=1,
+                diagnostics={"evidence_sources": ["sidecar_search"]},
+                to_text=lambda: 'Search Results\nActor: Aria the Captain\n- role: captain',
+            )
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_3",
+        simulation_requirement="Answer actor questions from retrieved memory.",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    result = agent.chat("Who is Aria?")
+
+    assert "Actor: Aria the Captain" in result["response"]
+    assert "Aria the Captain — role: captain" in result["response"]
+    assert "probably the central authority" not in result["response"]
+    assert result["tool_calls"]
+    assert result["tool_calls"][0]["name"] == "quick_search"
+
+
+def test_chat_auto_extracts_entity_query_from_russian_prompt():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def chat(self, **kwargs):
+            return "I don't know."
+
+    class ToolsStub:
+        def __init__(self):
+            self.last_query = None
+
+        def quick_search(self, **kwargs):
+            self.last_query = kwargs.get("query")
+            return types.SimpleNamespace(
+                facts=['Organization: Harbor Guild'],
+                nodes=[],
+                edges=[],
+                total_count=1,
+                diagnostics={"evidence_sources": ["sidecar_search"]},
+                to_text=lambda: 'Search Results\nOrganization: Harbor Guild',
+            )
+
+    tools = ToolsStub()
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_5",
+        simulation_requirement="Answer actor questions from retrieved memory.",
+        llm_client=LLMStub(),
+        zep_tools=tools,
+        graph_backend="cognee",
+    )
+
+    result = agent.chat("Что такое Harbor Guild? Ответь одной строкой.")
+
+    assert tools.last_query == "Harbor Guild"
+    assert "Organization: Harbor Guild" in result["response"]

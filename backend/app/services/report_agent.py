@@ -837,6 +837,8 @@ Scenario condition: {simulation_requirement}
 2. Respond directly and avoid long chains of meta-reasoning
 3. Only call tools when the report content is not enough to answer the question
 4. Keep answers concise, clear, well-structured, and faithful to the scenario outcome
+5. If you used tool results, answer only from explicit retrieved facts; do not infer beyond them
+6. If the retrieved facts are insufficient, say that clearly instead of guessing
 
 [Available tools] (use only if needed, at most 1-2 calls)
 {tools_description}
@@ -1070,6 +1072,235 @@ class ReportAgent:
             seen.add(text)
         return grounded
 
+    def _iter_chat_tool_candidates(self, tool_name: str, result: Any) -> List[Any]:
+        if tool_name == "insight_forge":
+            return list(getattr(result, "semantic_facts", []) or []) + list(
+                getattr(result, "relationship_chains", []) or []
+            ) + list(getattr(result, "entity_insights", []) or [])
+        if tool_name == "panorama_search":
+            return list(getattr(result, "active_facts", []) or []) + list(
+                getattr(result, "all_nodes", []) or []
+            ) + list(getattr(result, "all_edges", []) or [])
+        if tool_name == "quick_search":
+            return list(getattr(result, "facts", []) or []) + list(
+                getattr(result, "nodes", []) or []
+            ) + list(getattr(result, "edges", []) or [])
+        return []
+
+    def _extract_chat_subject(self, line: str) -> Optional[str]:
+        text = self._normalize_tool_fact(line)
+        if ":" not in text:
+            return None
+        prefix, value = text.split(":", 1)
+        prefix = prefix.strip().lower()
+        value = value.strip()
+        if prefix in {"actor", "organization", "contextlocation", "eventseed", "worldrule", "location", "event"} and value:
+            return value
+        return None
+
+    def _normalize_chat_fact_line(self, line: str, current_subject: Optional[str] = None) -> Optional[str]:
+        text = str(line or "").strip()
+        if not text:
+            return None
+
+        text = re.sub(r"^[\-•*]\s*", "", text)
+        text = self._normalize_tool_fact(text)
+        if not text:
+            return None
+
+        lowered = text.lower()
+        structural_markers = (
+            "source_id:",
+            "target_id:",
+            "canonical_id:",
+            "schema_version:",
+            "scenario_id:",
+            "world_id:",
+            "world_version:",
+            "speaker_mode:",
+            "uuid:",
+        )
+        if any(marker in lowered for marker in structural_markers):
+            return None
+
+        if lowered.startswith((
+            "search results",
+            "current key memory",
+            "active memory",
+            "referenced entities",
+            "core entities",
+            "relationship chains",
+            "grounded facts:",
+            "evidence sources:",
+            "verified runtime evidence from",
+        )):
+            return None
+
+        if re.match(r"^[0-9]+\s+(facts?|nodes?|edges?|results?)$", lowered):
+            return None
+
+        prefix_labels = {
+            "actor:": "Actor",
+            "organization:": "Organization",
+            "contextlocation:": "Location",
+            "eventseed:": "Event",
+            "worldrule:": "World rule",
+        }
+        for prefix, label in prefix_labels.items():
+            if lowered.startswith(prefix):
+                value = text.split(":", 1)[1].strip()
+                return f"{label}: {value}" if value else None
+
+        relation_match = re.match(r"socialedge:\s*(.+?)\s*->\s*(.+?)\s*\((.+?)\)\s*$", text, re.IGNORECASE)
+        if relation_match:
+            return (
+                f"Relation: {relation_match.group(1).strip()} -> "
+                f"{relation_match.group(2).strip()} ({relation_match.group(3).strip()})"
+            )
+
+        if current_subject:
+            field_match = re.match(r"([A-Za-z_ ]+):\s*(.+)$", text)
+            if field_match:
+                key = field_match.group(1).strip().lower().replace(" ", "_")
+                value = field_match.group(2).strip()
+                if key in {"role", "domain", "public_position", "stance", "kind", "summary", "status"}:
+                    label = key.replace("_", " ")
+                    return f"{current_subject} — {label}: {value}"
+
+        return text
+
+    def _extract_chat_tool_lines(self, tool_name: str, result: Any) -> List[str]:
+        facts: List[str] = []
+        seen = set()
+
+        for item in self._iter_chat_tool_candidates(tool_name, result):
+            current_subject: Optional[str] = None
+
+            if isinstance(item, dict):
+                structured_lines = []
+                name = self._normalize_tool_fact(item.get("name") or item.get("label") or item.get("title") or "")
+                item_type = self._normalize_tool_fact(item.get("type") or item.get("kind") or "")
+                if name:
+                    if item_type:
+                        structured_lines.append(f"{item_type}: {name}")
+                    else:
+                        structured_lines.append(name)
+                    current_subject = name
+                for key in ("role", "domain", "public_position", "stance", "kind", "summary", "status"):
+                    value = item.get(key)
+                    if value:
+                        structured_lines.append(f"{key}: {value}")
+                lines = structured_lines or [json.dumps(item, ensure_ascii=False)]
+            else:
+                lines = str(item or "").splitlines()
+
+            for raw_line in lines:
+                subject = self._extract_chat_subject(raw_line)
+                if subject:
+                    current_subject = subject
+                normalized = self._normalize_chat_fact_line(raw_line, current_subject=current_subject)
+                if not normalized or normalized in seen:
+                    continue
+                facts.append(normalized)
+                seen.add(normalized)
+
+        return facts
+
+    def _clean_chat_response(self, response: Optional[str]) -> str:
+        text = response or ""
+        text = re.sub(r'<tool_call>.*?</tool_call>', '', text, flags=re.DOTALL)
+        text = re.sub(r'\[TOOL_CALL\].*?\)', '', text)
+        return text.strip()
+
+    def _build_chat_search_query(self, message: str) -> str:
+        text = self._normalize_tool_fact(message)
+        latin_matches = re.findall(
+            r"[A-Z][A-Za-z0-9_'-]*(?:\s+(?:the\s+)?[A-Z][A-Za-z0-9_'-]*)*",
+            text,
+        )
+        if latin_matches:
+            return max(latin_matches, key=len).strip(" ?!.,")
+
+        text = re.sub(r"^(кто\s+(такая|такой|это)|что\s+такое|расскажи\s+про)\s+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*ответь.*$", "", text, flags=re.IGNORECASE)
+        return text.strip(" ?!.,") or self._normalize_tool_fact(message)
+
+    def _tokenize_chat_query(self, query: str) -> List[str]:
+        stop_words = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "from",
+            "that",
+            "this",
+            "кто",
+            "такая",
+            "такой",
+            "это",
+            "что",
+            "такое",
+            "ответь",
+            "одной",
+            "строкой",
+        }
+        tokens = re.findall(r"[A-Za-zА-Яа-я0-9_'-]+", query.lower())
+        return [token for token in tokens if len(token) >= 3 and token not in stop_words]
+
+    def _build_fact_bound_chat_response(self, tool_fact_records: List[Dict[str, Any]]) -> str:
+        matched_facts: List[str] = []
+        unmatched_facts: List[str] = []
+        seen_matched = set()
+        seen_unmatched = set()
+        checked_queries: List[str] = []
+
+        for record in tool_fact_records:
+            query = self._normalize_tool_fact(record.get("query", ""))
+            query_terms = self._tokenize_chat_query(query)
+            if query and query not in checked_queries:
+                checked_queries.append(query)
+            for fact in record.get("facts") or []:
+                normalized = self._normalize_tool_fact(fact)
+                if not normalized:
+                    continue
+                if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", normalized, re.IGNORECASE):
+                    continue
+
+                lowered_fact = normalized.lower()
+                is_match = bool(query_terms) and any(term in lowered_fact for term in query_terms)
+                if is_match:
+                    if normalized in seen_matched:
+                        continue
+                    matched_facts.append(normalized)
+                    seen_matched.add(normalized)
+                    continue
+
+                if normalized in seen_unmatched:
+                    continue
+                unmatched_facts.append(normalized)
+                seen_unmatched.add(normalized)
+
+        facts = matched_facts or unmatched_facts
+
+        if not facts:
+            lines = [
+                "I could not find enough verified facts in the current report memory to answer that reliably.",
+                "Please try a narrower question or add more simulation evidence.",
+            ]
+            if checked_queries:
+                lines.append(f"Checked queries: {', '.join(checked_queries[:3])}")
+            return "\n".join(lines)
+
+        if len(facts) == 1:
+            return facts[0]
+
+        lines = ["Based only on retrieved facts:"]
+        for fact in facts[:6]:
+            lines.append(f"- {fact}")
+        if len(facts) > 6:
+            lines.append(f"- … {len(facts) - 6} more retrieved facts omitted")
+        return "\n".join(lines)
+
     def _render_tool_result_for_llm(
         self,
         tool_name: str,
@@ -1279,6 +1510,7 @@ class ReportAgent:
                 "text": self._render_tool_result_for_llm(tool_name, result, raw_text, evidence),
                 "log_text": raw_text,
                 "evidence": evidence,
+                "chat_facts": self._extract_chat_tool_lines(tool_name, result),
             }
         except Exception as e:
             logger.error(f"Tool execution failed: {tool_name}, error: {str(e)}")
@@ -1291,6 +1523,7 @@ class ReportAgent:
                     "meaningful": False,
                     "error": str(e),
                 },
+                "chat_facts": [],
             }
 
     def _build_grounded_runtime_fallback(
@@ -2222,6 +2455,7 @@ class ReportAgent:
         
         # ReACT循环（简化版）
         tool_calls_made = []
+        tool_fact_records: List[Dict[str, Any]] = []
         max_iterations = 2  # 减少迭代轮数
         llm_tool_kwargs = self._get_llm_tool_kwargs()
         
@@ -2236,12 +2470,27 @@ class ReportAgent:
             tool_calls = self._parse_tool_calls(response)
             
             if not tool_calls:
-                # 没有工具调用，直接返回响应
-                clean_response = re.sub(r'<tool_call>.*?</tool_call>', '', response, flags=re.DOTALL)
-                clean_response = re.sub(r'\[TOOL_CALL\].*?\)', '', clean_response)
-                
+                if self.graph_backend == "cognee" and not tool_fact_records:
+                    auto_call = {
+                        "name": "quick_search",
+                        "parameters": {"query": self._build_chat_search_query(message), "limit": 8},
+                    }
+                    payload = self._execute_tool_payload(auto_call["name"], auto_call["parameters"])
+                    tool_calls_made.append(auto_call)
+                    tool_fact_records.append({
+                        "tool": auto_call["name"],
+                        "query": auto_call["parameters"]["query"],
+                        "facts": payload.get("chat_facts") or [],
+                    })
+                if self.graph_backend == "cognee" and tool_fact_records:
+                    return {
+                        "response": self._build_fact_bound_chat_response(tool_fact_records),
+                        "tool_calls": tool_calls_made,
+                        "sources": [tc.get("parameters", {}).get("query", "") for tc in tool_calls_made],
+                    }
+
                 return {
-                    "response": clean_response.strip(),
+                    "response": self._clean_chat_response(response),
                     "tool_calls": tool_calls_made,
                     "sources": [tc.get("parameters", {}).get("query", "") for tc in tool_calls_made]
                 }
@@ -2251,12 +2500,18 @@ class ReportAgent:
             for call in tool_calls[:1]:  # 每轮最多执行1次工具调用
                 if len(tool_calls_made) >= self.MAX_TOOL_CALLS_PER_CHAT:
                     break
-                result = self._execute_tool(call["name"], call.get("parameters", {}))
+                payload = self._execute_tool_payload(call["name"], call.get("parameters", {}))
+                result = payload.get("text", "")
                 tool_results.append({
                     "tool": call["name"],
                     "result": result[:1500]  # 限制结果长度
                 })
                 tool_calls_made.append(call)
+                tool_fact_records.append({
+                    "tool": call["name"],
+                    "query": call.get("parameters", {}).get("query", ""),
+                    "facts": payload.get("chat_facts") or [],
+                })
             
             # 将结果添加到消息
             messages.append({"role": "assistant", "content": response})
@@ -2272,12 +2527,15 @@ class ReportAgent:
             temperature=0.5
         )
         
-        # 清理响应
-        clean_response = re.sub(r'<tool_call>.*?</tool_call>', '', final_response, flags=re.DOTALL)
-        clean_response = re.sub(r'\[TOOL_CALL\].*?\)', '', clean_response)
+        if self.graph_backend == "cognee" and tool_fact_records:
+            return {
+                "response": self._build_fact_bound_chat_response(tool_fact_records),
+                "tool_calls": tool_calls_made,
+                "sources": [tc.get("parameters", {}).get("query", "") for tc in tool_calls_made]
+            }
         
         return {
-            "response": clean_response.strip(),
+            "response": self._clean_chat_response(final_response),
             "tool_calls": tool_calls_made,
             "sources": [tc.get("parameters", {}).get("query", "") for tc in tool_calls_made]
         }
