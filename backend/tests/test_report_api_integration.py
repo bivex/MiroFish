@@ -213,6 +213,77 @@ def test_get_report_http_returns_persisted_writeback_result():
     assert response["data"]["writeback_result"]["candidate_deltas_count"] == 2
 
 
+def test_chat_with_report_agent_http_resolves_simulation_id_from_report_id():
+    module, report_bp, request_obj = load_report_api_blueprint_module()
+    captured = {}
+
+    class ReportAgentStub:
+        def __init__(self, **kwargs):
+            captured["agent_kwargs"] = kwargs
+
+        def chat(self, message=None, chat_history=None):
+            captured["message"] = message
+            captured["chat_history"] = chat_history
+            return {"response": "ok"}
+
+    module.ReportAgent = ReportAgentStub
+    module.ReportManager = types.SimpleNamespace(
+        get_report=lambda report_id: types.SimpleNamespace(simulation_id="sim_from_report")
+    )
+    module.SimulationManager = lambda: types.SimpleNamespace(
+        get_simulation=lambda simulation_id: types.SimpleNamespace(
+            simulation_id=simulation_id,
+            project_id="proj_1",
+            graph_id="graph_1",
+            graph_backend="cognee",
+        )
+    )
+    module.ProjectManager = types.SimpleNamespace(
+        get_project=lambda project_id: types.SimpleNamespace(
+            project_id=project_id,
+            graph_id="graph_1",
+            graph_backend="cognee",
+            simulation_requirement="Track rumor spread.",
+        )
+    )
+
+    app = FakeFlaskApp(request_obj)
+    app.register_blueprint(report_bp, url_prefix="/api/report")
+    client = app.test_client()
+
+    response = client.post(
+        "/api/report/chat",
+        json={
+            "report_id": "report_1",
+            "message": "What happened?",
+            "chat_history": [{"role": "user", "content": "Earlier question"}],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["data"]["response"] == "ok"
+    assert captured["agent_kwargs"]["simulation_id"] == "sim_from_report"
+    assert captured["message"] == "What happened?"
+
+
+def test_chat_with_report_agent_http_requires_simulation_id_or_report_id():
+    module, report_bp, request_obj = load_report_api_blueprint_module()
+
+    app = FakeFlaskApp(request_obj)
+    app.register_blueprint(report_bp, url_prefix="/api/report")
+    client = app.test_client()
+
+    response = client.post(
+        "/api/report/chat",
+        json={"message": "What happened?"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "Please provide simulation_id or report_id"
+
+
 def test_collect_runtime_evidence_uses_public_runner_status():
     module, _, _ = load_report_api_blueprint_module()
 

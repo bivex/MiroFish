@@ -294,14 +294,14 @@
               class="chat-input"
               placeholder="Ask your question..."
               @keydown.enter.exact.prevent="sendMessage"
-              :disabled="isSending || (!selectedAgent && chatTarget === 'agent')"
+              :disabled="isSending || !interactionContextReady || (!selectedAgent && chatTarget === 'agent')"
               rows="1"
               ref="chatInputRef"
             ></textarea>
             <button 
               class="send-btn"
               @click="sendMessage"
-              :disabled="!chatInput.trim() || isSending || (!selectedAgent && chatTarget === 'agent')"
+              :disabled="!chatInput.trim() || isSending || !interactionContextReady || (!selectedAgent && chatTarget === 'agent')"
             >
               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -365,7 +365,7 @@
 
             <button 
               class="survey-submit-btn"
-              :disabled="selectedAgents.size === 0 || !surveyQuestion.trim() || isSurveying"
+              :disabled="selectedAgents.size === 0 || !surveyQuestion.trim() || isSurveying || !interactionContextReady"
               @click="submitSurvey"
             >
               <span v-if="isSurveying" class="loading-spinner"></span>
@@ -447,10 +447,13 @@ const isSurveying = ref(false)
 
 // Report Data
 const reportOutline = ref(null)
+const reportSimulationId = ref('')
 const generatedSections = ref({})
 const collapsedSections = ref(new Set())
 const currentSectionIndex = ref(null)
 const profiles = ref([])
+const effectiveSimulationId = computed(() => props.simulationId || reportSimulationId.value || '')
+const interactionContextReady = computed(() => Boolean(effectiveSimulationId.value))
 
 // Helper Methods
 const isSectionCompleted = (sectionIndex) => {
@@ -677,6 +680,10 @@ const sendMessage = async () => {
 }
 
 const sendToReportAgent = async (message) => {
+  if (!effectiveSimulationId.value) {
+    throw new Error('Simulation context is still loading for this report')
+  }
+
   addLog(`Sent to Report Agent: ${message.substring(0, 50)}...`)
   
   // Build chat history for API
@@ -689,7 +696,8 @@ const sendToReportAgent = async (message) => {
     }))
   
   const res = await chatWithReport({
-    simulation_id: props.simulationId,
+    simulation_id: effectiveSimulationId.value,
+    report_id: props.reportId,
     message: message,
     chat_history: historyForApi
   })
@@ -710,6 +718,10 @@ const sendToAgent = async (message) => {
   if (!selectedAgent.value || selectedAgentIndex.value === null) {
     throw new Error('Please select a simulated individual first')
   }
+
+  if (!effectiveSimulationId.value) {
+    throw new Error('Simulation context is still loading for this report')
+  }
   
   addLog(`Sent to ${selectedAgent.value.username}: ${message.substring(0, 50)}...`)
   
@@ -725,7 +737,7 @@ const sendToAgent = async (message) => {
   }
   
   const res = await interviewAgents({
-    simulation_id: props.simulationId,
+    simulation_id: effectiveSimulationId.value,
     interviews: [{
       agent_id: selectedAgentIndex.value,
       prompt: prompt
@@ -801,6 +813,11 @@ const clearAgentSelection = () => {
 
 const submitSurvey = async () => {
   if (selectedAgents.value.size === 0 || !surveyQuestion.value.trim()) return
+
+  if (!effectiveSimulationId.value) {
+    addLog('Survey blocked: simulation context is still loading')
+    return
+  }
   
   isSurveying.value = true
   addLog(`Sending survey to ${selectedAgents.value.size} targets...`)
@@ -812,7 +829,7 @@ const submitSurvey = async () => {
     }))
     
     const res = await interviewAgents({
-      simulation_id: props.simulationId,
+      simulation_id: effectiveSimulationId.value,
       interviews: interviews
     })
     
@@ -878,6 +895,8 @@ const loadReportData = async () => {
     // Get report info
     const reportRes = await getReport(props.reportId)
     if (reportRes.success && reportRes.data) {
+      reportSimulationId.value = reportRes.data.simulation_id || ''
+
       if (reportRes.data.outline) {
         reportOutline.value = reportRes.data.outline
       }
@@ -916,10 +935,10 @@ const loadAgentLogs = async () => {
 }
 
 const loadProfiles = async () => {
-  if (!props.simulationId) return
+  if (!effectiveSimulationId.value) return
   
   try {
-    const res = await getSimulationProfilesRealtime(props.simulationId, 'reddit')
+    const res = await getSimulationProfilesRealtime(effectiveSimulationId.value, 'reddit')
     if (res.success && res.data) {
       profiles.value = res.data.profiles || []
       addLog(`Loaded ${profiles.value.length} simulated individuals`)
@@ -960,6 +979,12 @@ watch(() => props.simulationId, (newId) => {
     loadProfiles()
   }
 }, { immediate: true })
+
+watch(effectiveSimulationId, (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    loadProfiles()
+  }
+})
 </script>
 
 <style scoped>

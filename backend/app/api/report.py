@@ -561,7 +561,8 @@ def chat_with_report_agent():
     
     请求（JSON）：
         {
-            "simulation_id": "sim_xxxx",        // 必填，模拟ID
+            "simulation_id": "sim_xxxx",        // 可选，模拟ID
+            "report_id": "report_xxxx",         // 可选，报告ID；若缺少 simulation_id 则尝试反查
             "message": "Please explain the public opinion trend",    // 必填，用户消息
             "chat_history": [                   // 可选，对话历史
                 {"role": "user", "content": "..."},
@@ -583,13 +584,19 @@ def chat_with_report_agent():
         data = request.get_json() or {}
         
         simulation_id = data.get('simulation_id')
+        report_id = data.get('report_id')
         message = data.get('message')
         chat_history = data.get('chat_history', [])
+
+        if not simulation_id and report_id:
+            report = ReportManager.get_report(report_id)
+            if report:
+                simulation_id = getattr(report, 'simulation_id', None)
         
         if not simulation_id:
             return jsonify({
                 "success": False,
-                "error": "Please provide simulation_id"
+                "error": "Please provide simulation_id or report_id"
             }), 400
         
         if not message:
