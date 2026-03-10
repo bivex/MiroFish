@@ -42,6 +42,8 @@
           :loading="graphLoading"
           :currentPhase="5"
           :isSimulating="false"
+          :emptyStateMessage="graphEmptyStateMessage"
+          :emptyStateHint="graphEmptyStateHint"
           @refresh="refreshGraph"
           @toggle-maximize="toggleMaximize('graph')"
         />
@@ -87,6 +89,7 @@ const simulationId = ref(null)
 const projectData = ref(null)
 const graphData = ref(null)
 const graphLoading = ref(false)
+const graphLoadError = ref('')
 const systemLogs = ref([])
 const currentStatus = ref('ready') // ready | processing | completed | error
 
@@ -115,6 +118,27 @@ const statusText = computed(() => {
   return 'Ready'
 })
 
+const graphEmptyStateMessage = computed(() => {
+  if (graphLoadError.value) return 'Unable to load graph data.'
+  if (Array.isArray(graphData.value?.nodes) && graphData.value.nodes.length === 0) {
+    return 'The graph loaded, but there are no renderable nodes yet.'
+  }
+  if (projectData.value?.graph_id) return 'Graph data is temporarily unavailable in this view.'
+  if (projectData.value?.ontology) return 'Ontology is ready, but the graph build has not completed yet.'
+  if (projectData.value) return 'Graph data has not been generated for this project yet.'
+  return 'Loading interaction context...'
+})
+
+const graphEmptyStateHint = computed(() => {
+  if (graphLoadError.value) return graphLoadError.value
+  if (Array.isArray(graphData.value?.nodes) && graphData.value.nodes.length === 0) {
+    return 'Try refreshing after more entities have been ingested into the graph.'
+  }
+  if (projectData.value?.graph_id) return 'This project already has a graph id. Use Refresh to retry loading it.'
+  if (projectData.value?.ontology) return 'Refresh after the graph build finishes.'
+  return ''
+})
+
 // --- Helpers ---
 const addLog = (msg) => {
   const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '.' + new Date().getMilliseconds().toString().padStart(3, '0')
@@ -140,6 +164,7 @@ const toggleMaximize = (target) => {
 // --- Data Logic ---
 const loadReportData = async () => {
   try {
+    graphLoadError.value = ''
     addLog(`Loading report data: ${currentReportId.value}`)
     
     // 获取 report 信息以获取 simulation_id
@@ -179,14 +204,21 @@ const loadReportData = async () => {
 
 const loadGraph = async (graphId) => {
   graphLoading.value = true
+  graphLoadError.value = ''
   
   try {
     const res = await getGraphData(graphId)
-    if (res.success) {
+    if (res.success && res.data) {
       graphData.value = res.data
       addLog('Graph data loaded successfully')
+    } else {
+      graphData.value = null
+      graphLoadError.value = 'The graph endpoint returned an empty payload.'
+      addLog('Graph endpoint returned no data')
     }
   } catch (err) {
+    graphData.value = null
+    graphLoadError.value = err.message
     addLog(`Failed to load graph data: ${err.message}`)
   } finally {
     graphLoading.value = false

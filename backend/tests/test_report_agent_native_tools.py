@@ -372,7 +372,7 @@ def test_generate_section_react_keeps_llm_content_when_tool_evidence_exists():
     assert content == "Verified synthesis based on retrieved evidence."
 
 
-def test_generate_section_react_uses_strict_grounded_fallback_when_final_answer_prefix_is_missing():
+def test_generate_section_react_uses_strict_grounded_fallback_when_final_answer_prefix_is_missing_and_content_is_not_substantive():
     module = load_report_agent_module()
 
     class LLMStub:
@@ -444,6 +444,88 @@ def test_generate_section_react_uses_strict_grounded_fallback_when_final_answer_
     assert "auto-finalized in strict grounding mode" in content
     assert "Royal Court posted that the decree remains valid." in content
     assert "Verified synthesis based on retrieved evidence." not in content
+
+
+def test_generate_section_react_keeps_substantive_content_when_final_answer_prefix_is_missing():
+    module = load_report_agent_module()
+
+    substantive_response = (
+        "The Royal Court reacted quickly to the forged-decree rumor, but the response stayed fragmented across platforms. "
+        "Boros kept the controversy visible by repeating and reframing the claim, which prevented a clean institutional reset.\n\n"
+        "That pattern suggests the crisis is being sustained by repeated amplification and role conflict rather than by a single viral spike."
+    )
+
+    class LLMStub:
+        def __init__(self):
+            self.responses = iter([
+                '<tool_call>{"name": "insight_forge", "parameters": {"query": "institutional response"}}</tool_call>',
+                '<tool_call>{"name": "panorama_search", "parameters": {"query": "guard statements"}}</tool_call>',
+                '<tool_call>{"name": "quick_search", "parameters": {"query": "royal court decree", "limit": 5}}</tool_call>',
+                substantive_response,
+            ])
+
+        def chat(self, **kwargs):
+            return next(self.responses)
+
+    class ToolsStub:
+        def insight_forge(self, **kwargs):
+            return types.SimpleNamespace(
+                semantic_facts=[],
+                entity_insights=[],
+                relationship_chains=[],
+                diagnostics={"evidence_sources": ["runtime_actions"]},
+                to_text=lambda: "Current Key Memory (0)",
+            )
+
+        def panorama_search(self, **kwargs):
+            return types.SimpleNamespace(
+                active_facts=[],
+                all_nodes=[],
+                all_edges=[],
+                diagnostics={"evidence_sources": ["runtime_actions"]},
+                to_text=lambda: "Active Memory (0)",
+            )
+
+        def quick_search(self, **kwargs):
+            return types.SimpleNamespace(
+                facts=[
+                    "[round 10] [twitter] Royal Court posted that the decree remains valid.",
+                    "[round 9] [twitter] Boros the Dockmaster repeated the forged-decree claim.",
+                ],
+                nodes=[],
+                edges=[],
+                total_count=2,
+                diagnostics={"evidence_sources": ["runtime_actions"]},
+                to_text=lambda: "Search Results\n2 facts\n[round 10] [twitter] Royal Court posted that the decree remains valid.",
+            )
+
+        def get_runtime_evidence(self, simulation_id, limit=10):
+            return {"simulation_id": simulation_id, "has_runtime_evidence": True}
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_substantive_prefixless",
+        simulation_requirement="Analyze official messaging.",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    outline = module.ReportOutline(
+        title="Institutional Report",
+        summary="Use retrieved evidence",
+        sections=[module.ReportSection(title="Institutional Reactions")],
+    )
+
+    content = agent._generate_section_react(
+        section=outline.sections[0],
+        outline=outline,
+        previous_sections=[],
+        section_index=0,
+    )
+
+    assert content == substantive_response
+    assert "auto-finalized in strict grounding mode" not in content
 
 
 def test_generate_section_react_uses_runtime_fallback_when_tool_results_are_graph_noise_only():

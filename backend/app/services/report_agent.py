@@ -2030,6 +2030,55 @@ class ReportAgent:
         ])
         return "\n".join(lines).strip()
 
+    def _looks_like_substantive_section_content(self, text: str) -> bool:
+        normalized = (text or "").strip()
+        if not normalized:
+            return False
+
+        lowered = normalized.lower()
+        rejected_prefixes = (
+            "thought:",
+            "observation:",
+            "action:",
+            "tool:",
+            "assistant:",
+            "user:",
+        )
+        if any(lowered.startswith(prefix) for prefix in rejected_prefixes):
+            return False
+
+        rejected_fragments = (
+            "<tool_call>",
+            "</tool_call>",
+            '"parameters"',
+            '"name"',
+            "unknown tool:",
+            "tool execution failed:",
+            "verified runtime evidence from",
+            "grounded facts:",
+        )
+        if any(fragment in lowered for fragment in rejected_fragments):
+            return False
+
+        nonempty_lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+        if not nonempty_lines:
+            return False
+
+        prose_lines = [
+            line for line in nonempty_lines
+            if not line.startswith(("-", "*")) and not re.match(r"^\[[^\]]+\]", line)
+        ]
+        sentence_marks = sum(normalized.count(mark) for mark in ".!?")
+        alpha_chars = sum(1 for char in normalized if char.isalpha())
+
+        if alpha_chars < 40:
+            return False
+        if prose_lines and (len(normalized) >= 120 or sentence_marks >= 2):
+            return True
+        if not prose_lines and len(nonempty_lines) >= 3 and len(normalized) >= 120:
+            return True
+        return False
+
     def _finalize_section_output(
         self,
         section: "ReportSection",
@@ -2063,23 +2112,42 @@ class ReportAgent:
                 )
 
         elif self.graph_backend == "cognee" and not had_final_answer:
-            logger.warning(
-                f"章节 {section.title} 缺少显式 Final Answer，使用 strict grounded fallback "
-                f"（tool_calls={tool_calls_count}）"
-            )
-            final_answer = self._build_strict_grounded_section_fallback(tool_evidence_records)
-            if self.report_logger:
-                self.report_logger.log(
-                    action="section_strict_grounded_fallback",
-                    stage="generating",
-                    section_title=section.title,
-                    section_index=section_index,
-                    details={
-                        "message": "Model response lacked an explicit Final Answer; replaced section with strict grounded fallback.",
-                        "tool_calls_count": tool_calls_count,
-                        "tool_evidence": tool_evidence_records,
-                    },
+            if self._looks_like_substantive_section_content(final_answer):
+                logger.info(
+                    f"章节 {section.title} 缺少显式 Final Answer，但保留有内容的 grounded section draft "
+                    f"（tool_calls={tool_calls_count}）"
                 )
+                if self.report_logger:
+                    self.report_logger.log(
+                        action="section_finalized_without_prefix",
+                        stage="generating",
+                        section_title=section.title,
+                        section_index=section_index,
+                        details={
+                            "message": "Model response lacked an explicit Final Answer prefix but contained substantive section content; preserved as-is.",
+                            "tool_calls_count": tool_calls_count,
+                            "content_length": len(final_answer),
+                            "tool_evidence": tool_evidence_records,
+                        },
+                    )
+            else:
+                logger.warning(
+                    f"章节 {section.title} 缺少显式 Final Answer，使用 strict grounded fallback "
+                    f"（tool_calls={tool_calls_count}）"
+                )
+                final_answer = self._build_strict_grounded_section_fallback(tool_evidence_records)
+                if self.report_logger:
+                    self.report_logger.log(
+                        action="section_strict_grounded_fallback",
+                        stage="generating",
+                        section_title=section.title,
+                        section_index=section_index,
+                        details={
+                            "message": "Model response lacked an explicit Final Answer; replaced section with strict grounded fallback.",
+                            "tool_calls_count": tool_calls_count,
+                            "tool_evidence": tool_evidence_records,
+                        },
+                    )
 
         if self.report_logger:
             self.report_logger.log_section_content(

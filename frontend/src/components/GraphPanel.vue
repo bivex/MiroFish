@@ -16,7 +16,7 @@
     
     <div class="graph-container" ref="graphContainer">
       <!-- 图谱可视化 -->
-      <div v-if="graphData" class="graph-view">
+      <div v-if="hasRenderableGraph" class="graph-view">
         <svg ref="graphSvg" class="graph-svg"></svg>
         
         <!-- 构建中/模拟中提示 -->
@@ -209,12 +209,13 @@
       <!-- 等待/空状态 -->
       <div v-else class="graph-state">
         <div class="empty-icon">❖</div>
-        <p class="empty-text">Waiting for ontology generation...</p>
+        <p class="empty-text">{{ emptyStateMessage }}</p>
+        <p v-if="emptyStateHint" class="empty-hint">{{ emptyStateHint }}</p>
       </div>
     </div>
 
     <!-- 底部图例 (Bottom Left) -->
-    <div v-if="graphData && entityTypes.length" class="graph-legend">
+    <div v-if="hasRenderableGraph && entityTypes.length" class="graph-legend">
       <span class="legend-title">Entity Types</span>
       <div class="legend-items">
         <div class="legend-item" v-for="type in entityTypes" :key="type.name">
@@ -225,7 +226,7 @@
     </div>
     
     <!-- 显示边标签开关 -->
-    <div v-if="graphData" class="edge-labels-toggle">
+    <div v-if="hasRenderableGraph" class="edge-labels-toggle">
       <label class="toggle-switch">
         <input type="checkbox" v-model="showEdgeLabels" />
         <span class="slider"></span>
@@ -243,7 +244,15 @@ const props = defineProps({
   graphData: Object,
   loading: Boolean,
   currentPhase: Number,
-  isSimulating: Boolean
+  isSimulating: Boolean,
+  emptyStateMessage: {
+    type: String,
+    default: 'Graph data is not available yet.'
+  },
+  emptyStateHint: {
+    type: String,
+    default: ''
+  }
 })
 
 const emit = defineEmits(['refresh', 'toggle-maximize'])
@@ -255,6 +264,8 @@ const showEdgeLabels = ref(true) // 默认显示边标签
 const expandedSelfLoops = ref(new Set()) // 展开的自环项
 const showSimulationFinishedHint = ref(false) // 模拟结束后的提示
 const wasSimulating = ref(false) // 追踪之前是否在模拟中
+
+const hasRenderableGraph = computed(() => Array.isArray(props.graphData?.nodes) && props.graphData.nodes.length > 0)
 
 // 关闭模拟结束提示
 const dismissFinishedHint = () => {
@@ -909,6 +920,20 @@ onUnmounted(() => {
   font-size: 48px;
   margin-bottom: 16px;
   opacity: 0.2;
+}
+
+.empty-text {
+  margin: 0;
+  font-weight: 500;
+  color: #666;
+}
+
+.empty-hint {
+  margin: 8px 0 0;
+  max-width: 360px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #888;
 }
 
 /* Entity Types Legend - Bottom Left */
