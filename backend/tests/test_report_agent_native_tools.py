@@ -182,6 +182,37 @@ def test_report_manager_falls_back_to_latest_created_when_no_completed_reports(t
     assert report.report_id == "report_new"
 
 
+def test_report_manager_roundtrip_preserves_writeback_result(tmp_path: Path):
+    module = load_report_agent_module()
+    module.ReportManager.REPORTS_DIR = str(tmp_path / "reports")
+
+    writeback_result = {
+        "enabled": True,
+        "ok": True,
+        "candidate_deltas_count": 2,
+        "auto_promote": {
+            "success_count": 2,
+            "failure_count": 0,
+        },
+    }
+    module.ReportManager.save_report(module.Report(
+        report_id="report_with_writeback",
+        simulation_id="sim_1",
+        graph_id="g1",
+        simulation_requirement="req",
+        status=module.ReportStatus.COMPLETED,
+        created_at="2026-03-10T12:00:00",
+        completed_at="2026-03-10T12:05:00",
+        writeback_result=writeback_result,
+    ))
+
+    loaded = module.ReportManager.get_report("report_with_writeback")
+
+    assert loaded is not None
+    assert loaded.writeback_result == writeback_result
+    assert loaded.to_dict()["writeback_result"]["auto_promote"]["success_count"] == 2
+
+
 def test_generate_section_react_uses_runtime_fallback_when_all_tool_results_are_empty():
     module = load_report_agent_module()
 

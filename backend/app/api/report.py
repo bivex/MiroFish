@@ -12,6 +12,7 @@ from flask import request, jsonify, send_file
 from . import report_bp
 from ..config import Config
 from ..services.graph_backend_factory import get_report_tools_service
+from ..services.mirofish_writeback_bridge import try_post_report_writeback
 from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
 from ..services.simulation_manager import SimulationManager
 from ..services.simulation_runner import SimulationRunner
@@ -216,13 +217,33 @@ def generate_report():
                 ReportManager.save_report(report)
                 
                 if report.status == ReportStatus.COMPLETED:
-                    task_manager.complete_task(
-                        task_id,
-                        result={
+                    writeback_result = None
+                    try:
+                        writeback_result = try_post_report_writeback(report, graph_backend=graph_backend)
+                    except Exception as bridge_exc:
+                        logger.error(f"Write-back bridge crashed unexpectedly: {bridge_exc}")
+                        writeback_result = {
+                            "enabled": True,
+                            "ok": False,
+                            "error": str(bridge_exc),
                             "report_id": report.report_id,
                             "simulation_id": simulation_id,
-                            "status": "completed"
                         }
+
+                    report.writeback_result = writeback_result
+                    ReportManager.save_report(report)
+
+                    result_payload = {
+                        "report_id": report.report_id,
+                        "simulation_id": simulation_id,
+                        "status": "completed"
+                    }
+                    if writeback_result is not None:
+                        result_payload["writeback"] = writeback_result
+
+                    task_manager.complete_task(
+                        task_id,
+                        result=result_payload
                     )
                 else:
                     task_manager.fail_task(task_id, report.error or "Report generation failed")

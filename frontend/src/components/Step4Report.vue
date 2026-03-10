@@ -127,6 +127,87 @@
             </div>
           </div>
 
+          <div v-if="isComplete" class="writeback-card">
+            <div class="writeback-card-header">
+              <div>
+                <div class="writeback-card-title">Lore Write-back</div>
+                <div class="writeback-card-subtitle mono">RUN {{ writebackRunLabel }}</div>
+              </div>
+              <span class="writeback-badge mono" :class="`writeback-badge--${writebackStatusClass}`">{{ writebackStatusText }}</span>
+            </div>
+
+            <div v-if="!reportDetailLoaded && !writebackResult" class="writeback-empty">
+              Loading persisted write-back summary...
+            </div>
+
+            <div v-else-if="reportDetailError" class="writeback-empty writeback-empty--error">
+              {{ reportDetailError }}
+            </div>
+
+            <template v-else-if="writebackResult">
+              <div class="writeback-grid">
+                <div class="writeback-metric">
+                  <span class="writeback-metric-label">Candidates</span>
+                  <span class="writeback-metric-value mono">{{ writebackCandidateCount }}</span>
+                </div>
+                <div class="writeback-metric">
+                  <span class="writeback-metric-label">Evidence</span>
+                  <span class="writeback-metric-value mono">{{ writebackEvidenceCount }}</span>
+                </div>
+                <div class="writeback-metric">
+                  <span class="writeback-metric-label">Promoted</span>
+                  <span class="writeback-metric-value mono">{{ autoPromoteSuccessCount }}</span>
+                </div>
+                <div class="writeback-metric">
+                  <span class="writeback-metric-label">Failed</span>
+                  <span class="writeback-metric-value mono">{{ autoPromoteFailureCount }}</span>
+                </div>
+              </div>
+
+              <div v-if="writebackResult.enabled === false" class="writeback-note">
+                Write-back bridge was disabled for this report.
+              </div>
+              <div v-else-if="writebackResult.skipped" class="writeback-note">
+                {{ writebackResult.reason || 'Write-back was skipped for this run.' }}
+              </div>
+              <div v-else-if="writebackResult.error" class="writeback-note writeback-note--error">
+                {{ writebackResult.error }}
+              </div>
+
+              <div v-if="autoPromoteSummary" class="writeback-subsection">
+                <div class="writeback-subtitle-row">
+                  <span class="writeback-subtitle">Auto-promotion</span>
+                  <span class="writeback-submeta mono">{{ autoPromotePolicyCount }} POLICIES</span>
+                </div>
+                <div class="writeback-chip-row">
+                  <span class="writeback-chip mono">ATTEMPTED {{ autoPromoteAttemptedCount }}</span>
+                  <span class="writeback-chip mono">SUCCESS {{ autoPromoteSuccessCount }}</span>
+                  <span class="writeback-chip mono" :class="{ 'writeback-chip--error': autoPromoteFailureCount > 0 }">FAIL {{ autoPromoteFailureCount }}</span>
+                </div>
+              </div>
+
+              <div v-if="canonicalPromotions.length > 0" class="writeback-subsection">
+                <div class="writeback-subtitle-row">
+                  <span class="writeback-subtitle">Canonical entities</span>
+                  <span class="writeback-submeta mono">{{ canonicalPromotions.length }} CREATED</span>
+                </div>
+                <div class="writeback-entity-list">
+                  <div v-for="item in canonicalPromotions" :key="item.key" class="writeback-entity-item">
+                    <div class="writeback-entity-main">
+                      <span class="writeback-entity-type">{{ item.canonicalType }}</span>
+                      <span class="writeback-entity-id mono">#{{ item.canonicalId ?? '?' }}</span>
+                    </div>
+                    <div class="writeback-entity-meta mono">{{ item.candidateType }} · {{ item.candidateId }}</div>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <div v-else class="writeback-empty">
+              No write-back summary was persisted for this report.
+            </div>
+          </div>
+
           <!-- Next Step Button - 在完成后显示 -->
           <button v-if="isComplete" class="next-step-btn" @click="goToInteraction">
             <span>Enter Deep Interaction</span>
@@ -392,7 +473,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } from 'vue'
 import { useRouter } from 'vue-router'
-import { getAgentLog, getConsoleLog } from '../api/report'
+import { getAgentLog, getConsoleLog, getReport } from '../api/report'
 
 const router = useRouter()
 
@@ -428,6 +509,9 @@ const leftPanel = ref(null)
 const rightPanel = ref(null)
 const logContent = ref(null)
 const showRawResult = reactive({})
+const reportDetail = ref(null)
+const reportDetailLoaded = ref(false)
+const reportDetailError = ref('')
 
 // Toggle functions
 const toggleRawResult = (timestamp, event) => {
@@ -1810,6 +1894,64 @@ const progressPercent = computed(() => {
   return Math.round((completedSections.value / totalSections.value) * 100)
 })
 
+const writebackResult = computed(() => {
+  return reportDetail.value?.writeback_result || null
+})
+
+const autoPromoteSummary = computed(() => {
+  return writebackResult.value?.auto_promote || null
+})
+
+const writebackCandidateCount = computed(() => Number(writebackResult.value?.candidate_deltas_count || 0))
+const writebackEvidenceCount = computed(() => Number(writebackResult.value?.runtime_evidence_count || 0))
+const autoPromoteAttemptedCount = computed(() => Number(autoPromoteSummary.value?.attempted_candidate_count || 0))
+const autoPromoteSuccessCount = computed(() => Number(autoPromoteSummary.value?.success_count || 0))
+const autoPromoteFailureCount = computed(() => Number(autoPromoteSummary.value?.failure_count || 0))
+const autoPromotePolicyCount = computed(() => {
+  const summary = autoPromoteSummary.value
+  if (!summary) return 0
+  return Number(summary.policy_count || summary.responses?.length || 0)
+})
+
+const writebackStatusClass = computed(() => {
+  const writeback = writebackResult.value
+  if (!writeback) return reportDetailError.value ? 'error' : 'pending'
+  if (writeback.ok) return 'success'
+  if (writeback.enabled === false || writeback.skipped) return 'pending'
+  return 'error'
+})
+
+const writebackStatusText = computed(() => {
+  const writeback = writebackResult.value
+  if (!writeback) return reportDetailLoaded.value ? 'Unavailable' : 'Loading'
+  if (writeback.ok) return 'Synced'
+  if (writeback.enabled === false) return 'Disabled'
+  if (writeback.skipped) return 'Skipped'
+  return 'Failed'
+})
+
+const writebackRunLabel = computed(() => {
+  return writebackResult.value?.run_id || props.reportId || 'pending'
+})
+
+const canonicalPromotions = computed(() => {
+  const responses = autoPromoteSummary.value?.responses || []
+  return responses.flatMap((response, responseIdx) => {
+    const succeeded = response?.body?.data?.succeeded || []
+    return succeeded.map((item, itemIdx) => {
+      const candidate = item?.candidate || {}
+      const canonical = item?.canonical_entity || {}
+      return {
+        key: `${responseIdx}-${itemIdx}-${item?.candidate_id || candidate.candidate_id || canonical.canonical_id || 'item'}`,
+        candidateId: item?.candidate_id || candidate.candidate_id || 'unknown',
+        candidateType: candidate.candidate_type || item?.candidate_type || 'candidate',
+        canonicalId: canonical?.canonical_id || item?.target_canonical_id || null,
+        canonicalType: canonical?.canonical_type || 'CanonicalEntity',
+      }
+    })
+  })
+})
+
 const totalToolCalls = computed(() => {
   return agentLogs.value.filter(l => l.action === 'tool_call').length
 })
@@ -1909,6 +2051,41 @@ const workflowSteps = computed(() => {
 // Methods
 const addLog = (msg) => {
   emit('add-log', msg)
+}
+
+const fetchReportDetail = async ({ allowIncomplete = false } = {}) => {
+  if (!props.reportId) return
+
+  try {
+    const res = await getReport(props.reportId)
+    if (res.success && res.data) {
+      reportDetail.value = res.data
+      reportDetailLoaded.value = true
+      reportDetailError.value = ''
+
+      if (!reportOutline.value && res.data.outline) {
+        reportOutline.value = res.data.outline
+      }
+
+      if (res.data.status === 'completed') {
+        isComplete.value = true
+        emit('update-status', 'completed')
+        stopPolling()
+      }
+      return
+    }
+
+    if (!allowIncomplete) {
+      reportDetailLoaded.value = true
+      reportDetailError.value = res?.error || 'Failed to fetch report details'
+    }
+  } catch (err) {
+    if (!allowIncomplete) {
+      reportDetailLoaded.value = true
+      reportDetailError.value = err?.message || 'Failed to fetch report details'
+    }
+    console.warn('Failed to fetch report detail:', err)
+  }
 }
 
 const isSectionCompleted = (sectionIndex) => {
@@ -2136,6 +2313,7 @@ const fetchAgentLog = async () => {
             currentSectionIndex.value = null  // 确保清除 loading 状态
             emit('update-status', 'completed')
             stopPolling()
+            void fetchReportDetail()
             // 滚动逻辑统一在循环结束后的 nextTick 中处理
           }
           
@@ -2280,7 +2458,11 @@ watch(() => props.reportId, (newId) => {
     collapsedSections.value = new Set()
     isComplete.value = false
     startTime.value = null
+    reportDetail.value = null
+    reportDetailLoaded.value = false
+    reportDetailError.value = ''
     
+    void fetchReportDetail({ allowIncomplete: true })
     startPolling()
   }
 }, { immediate: true })
@@ -2973,6 +3155,200 @@ watch(() => props.reportId, (newId) => {
   height: 1px;
   background: var(--wf-divider);
   margin: 14px 0 0 0;
+}
+
+.writeback-card {
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--wf-divider);
+  border-radius: 8px;
+  background: #FFFFFF;
+}
+
+.writeback-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.writeback-card-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #111827;
+}
+
+.writeback-card-subtitle {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #6B7280;
+}
+
+.writeback-badge {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--wf-border);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.writeback-badge--success {
+  background: #ECFDF5;
+  border-color: #A7F3D0;
+  color: #065F46;
+}
+
+.writeback-badge--pending {
+  background: #F9FAFB;
+  border-style: dashed;
+  color: #6B7280;
+}
+
+.writeback-badge--error {
+  background: #FEF2F2;
+  border-color: #FECACA;
+  color: #991B1B;
+}
+
+.writeback-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.writeback-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--wf-divider);
+  border-radius: 8px;
+  background: #FAFAFA;
+}
+
+.writeback-metric-label {
+  font-size: 11px;
+  color: #6B7280;
+}
+
+.writeback-metric-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.writeback-note,
+.writeback-empty {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #4B5563;
+  background: #F9FAFB;
+}
+
+.writeback-empty {
+  border: 1px dashed var(--wf-border);
+  background: transparent;
+}
+
+.writeback-note--error,
+.writeback-empty--error {
+  color: #991B1B;
+  background: #FEF2F2;
+  border: 1px solid #FECACA;
+}
+
+.writeback-subsection {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--wf-divider);
+}
+
+.writeback-subtitle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.writeback-subtitle {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #111827;
+}
+
+.writeback-submeta {
+  font-size: 10px;
+  color: #6B7280;
+}
+
+.writeback-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.writeback-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--wf-divider);
+  background: #F9FAFB;
+  font-size: 10px;
+  font-weight: 700;
+  color: #374151;
+}
+
+.writeback-chip--error {
+  border-color: #FECACA;
+  color: #991B1B;
+  background: #FEF2F2;
+}
+
+.writeback-entity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.writeback-entity-item {
+  padding: 10px 12px;
+  border: 1px solid var(--wf-divider);
+  border-radius: 8px;
+  background: #FAFAFA;
+}
+
+.writeback-entity-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.writeback-entity-type {
+  font-size: 13px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.writeback-entity-id,
+.writeback-entity-meta {
+  font-size: 10px;
+  color: #6B7280;
+}
+
+.writeback-entity-meta {
+  margin-top: 4px;
+  word-break: break-all;
 }
 
 /* Workflow Timeline */

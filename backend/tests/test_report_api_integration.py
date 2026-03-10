@@ -94,6 +94,10 @@ def load_report_api_blueprint_module():
     factory_module.get_report_tools_service = lambda graph_backend=None: object()
     sys.modules["app.services.graph_backend_factory"] = factory_module
 
+    sys.modules["app.services.mirofish_writeback_bridge"] = types.SimpleNamespace(
+        try_post_report_writeback=lambda report, graph_backend=None: {"enabled": False, "skipped": True}
+    )
+
     report_agent_module = types.ModuleType("app.services.report_agent")
     report_agent_module.ReportAgent = object
     report_agent_module.ReportManager = types.SimpleNamespace(get_report_by_simulation=lambda simulation_id: None)
@@ -186,6 +190,29 @@ def test_get_report_by_simulation_http_returns_manager_selected_report():
     assert response["data"]["report_id"] == "report_latest_completed"
 
 
+def test_get_report_http_returns_persisted_writeback_result():
+    module, _, _ = load_report_api_blueprint_module()
+
+    report = types.SimpleNamespace(
+        to_dict=lambda: {
+            "report_id": "report_with_writeback",
+            "simulation_id": "sim_1",
+            "status": "completed",
+            "writeback_result": {
+                "enabled": True,
+                "ok": True,
+                "candidate_deltas_count": 2,
+            },
+        }
+    )
+    module.ReportManager = types.SimpleNamespace(get_report=lambda report_id: report)
+
+    response = module.get_report("report_with_writeback")
+
+    assert response["success"] is True
+    assert response["data"]["writeback_result"]["candidate_deltas_count"] == 2
+
+
 def test_collect_runtime_evidence_uses_public_runner_status():
     module, _, _ = load_report_api_blueprint_module()
 
@@ -208,6 +235,182 @@ def test_collect_runtime_evidence_uses_public_runner_status():
     assert payload["current_round"] == 12
     assert payload["total_actions"] == 18
     assert payload["has_runtime_evidence"] is True
+
+
+def test_generate_report_http_completed_task_includes_writeback_result():
+    module, report_bp, request_obj = load_report_api_blueprint_module()
+    completed = {}
+    saved_reports = []
+
+    class TaskManagerStub:
+        def create_task(self, task_type, metadata=None):
+            return "task_1"
+
+        def update_task(self, *args, **kwargs):
+            return None
+
+        def complete_task(self, task_id, result):
+            completed["task_id"] = task_id
+            completed["result"] = result
+
+        def fail_task(self, task_id, error):
+            raise AssertionError(f"unexpected fail_task: {task_id} {error}")
+
+    class ReportAgentStub:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def generate_report(self, progress_callback=None, report_id=None):
+            return types.SimpleNamespace(
+                report_id=report_id,
+                simulation_id="sim_1",
+                graph_id="graph_1",
+                simulation_requirement="Track rumor spread.",
+                status=module.ReportStatus.COMPLETED,
+                error=None,
+            )
+
+    class ThreadStub:
+        def __init__(self, target=None, daemon=None):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    module.TaskManager = TaskManagerStub
+    module.TaskStatus = types.SimpleNamespace(PROCESSING="processing")
+    module.ReportAgent = ReportAgentStub
+    module.threading.Thread = ThreadStub
+    module.ReportManager = types.SimpleNamespace(
+        get_report_by_simulation=lambda simulation_id: None,
+        save_report=lambda report: saved_reports.append(report),
+    )
+    module.SimulationManager = lambda: types.SimpleNamespace(
+        get_simulation=lambda simulation_id: types.SimpleNamespace(
+            simulation_id=simulation_id,
+            project_id="proj_1",
+            graph_id="graph_1",
+            graph_backend="zep",
+        )
+    )
+    module.ProjectManager = types.SimpleNamespace(
+        get_project=lambda project_id: types.SimpleNamespace(
+            project_id=project_id,
+            graph_id="graph_1",
+            graph_backend="zep",
+            simulation_requirement="Track rumor spread.",
+        )
+    )
+    module.try_post_report_writeback = lambda report, graph_backend=None: {
+        "enabled": True,
+        "ok": True,
+        "run_id": report.report_id,
+    }
+
+    app = FakeFlaskApp(request_obj)
+    app.register_blueprint(report_bp, url_prefix="/api/report")
+    client = app.test_client()
+
+    response = client.post("/api/report/generate", json={"simulation_id": "sim_1", "graph_backend": "zep"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert completed["task_id"] == "task_1"
+    assert completed["result"]["status"] == "completed"
+    assert completed["result"]["writeback"] == {
+        "enabled": True,
+        "ok": True,
+        "run_id": payload["data"]["report_id"],
+    }
+    assert len(saved_reports) == 2
+    assert saved_reports[-1].writeback_result == completed["result"]["writeback"]
+
+
+def test_generate_report_http_bridge_exception_does_not_fail_completed_task():
+    module, report_bp, request_obj = load_report_api_blueprint_module()
+    completed = {}
+    saved_reports = []
+
+    class TaskManagerStub:
+        def create_task(self, task_type, metadata=None):
+            return "task_2"
+
+        def update_task(self, *args, **kwargs):
+            return None
+
+        def complete_task(self, task_id, result):
+            completed["task_id"] = task_id
+            completed["result"] = result
+
+        def fail_task(self, task_id, error):
+            raise AssertionError(f"unexpected fail_task: {task_id} {error}")
+
+    class ReportAgentStub:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def generate_report(self, progress_callback=None, report_id=None):
+            return types.SimpleNamespace(
+                report_id=report_id,
+                simulation_id="sim_2",
+                graph_id="graph_2",
+                simulation_requirement="Track rumor spread.",
+                status=module.ReportStatus.COMPLETED,
+                error=None,
+            )
+
+    class ThreadStub:
+        def __init__(self, target=None, daemon=None):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    module.TaskManager = TaskManagerStub
+    module.TaskStatus = types.SimpleNamespace(PROCESSING="processing")
+    module.ReportAgent = ReportAgentStub
+    module.threading.Thread = ThreadStub
+    module.ReportManager = types.SimpleNamespace(
+        get_report_by_simulation=lambda simulation_id: None,
+        save_report=lambda report: saved_reports.append(report),
+    )
+    module.SimulationManager = lambda: types.SimpleNamespace(
+        get_simulation=lambda simulation_id: types.SimpleNamespace(
+            simulation_id=simulation_id,
+            project_id="proj_2",
+            graph_id="graph_2",
+            graph_backend="zep",
+        )
+    )
+    module.ProjectManager = types.SimpleNamespace(
+        get_project=lambda project_id: types.SimpleNamespace(
+            project_id=project_id,
+            graph_id="graph_2",
+            graph_backend="zep",
+            simulation_requirement="Track rumor spread.",
+        )
+    )
+
+    def explode(report, graph_backend=None):
+        raise RuntimeError("bridge boom")
+
+    module.try_post_report_writeback = explode
+
+    app = FakeFlaskApp(request_obj)
+    app.register_blueprint(report_bp, url_prefix="/api/report")
+    client = app.test_client()
+
+    response = client.post("/api/report/generate", json={"simulation_id": "sim_2", "graph_backend": "zep"})
+
+    assert response.status_code == 200
+    assert response.get_json()["success"] is True
+    assert completed["task_id"] == "task_2"
+    assert completed["result"]["status"] == "completed"
+    assert completed["result"]["writeback"]["ok"] is False
+    assert completed["result"]["writeback"]["error"] == "bridge boom"
+    assert len(saved_reports) == 2
+    assert saved_reports[-1].writeback_result == completed["result"]["writeback"]
 
 
 def test_panorama_tool_http_returns_serialized_result():

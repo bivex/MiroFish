@@ -445,6 +445,7 @@ class Report:
     created_at: str = ""
     completed_at: str = ""
     error: Optional[str] = None
+    writeback_result: Optional[Dict[str, Any]] = None
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -457,7 +458,8 @@ class Report:
             "markdown_content": self.markdown_content,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
-            "error": self.error
+            "error": self.error,
+            "writeback_result": self.writeback_result,
         }
 
 
@@ -3642,7 +3644,8 @@ class ReportManager:
             markdown_content=markdown_content,
             created_at=data.get('created_at', ''),
             completed_at=data.get('completed_at', ''),
-            error=data.get('error')
+            error=data.get('error'),
+            writeback_result=data.get('writeback_result'),
         )
     
     @classmethod

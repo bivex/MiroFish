@@ -74,3 +74,30 @@ def test_check_simulation_prepared_allows_twitter_only_simulations(tmp_path):
     assert is_prepared is True
     assert info["status"] == "stopped"
     assert info["profiles_count"] == 1
+
+
+def test_get_run_status_uses_public_runner_state_payload(tmp_path):
+    module = load_simulation_api_module(tmp_path)
+
+    raw_payload = {
+        "simulation_id": "sim_waiting_completed",
+        "runner_status": "running",
+        "current_round": 5,
+    }
+    public_payload = {
+        "simulation_id": "sim_waiting_completed",
+        "runner_status": "completed",
+        "current_round": 5,
+        "completed_at": "2026-03-10T13:23:00",
+    }
+
+    run_state = types.SimpleNamespace(to_dict=lambda: raw_payload)
+    module.SimulationRunner = types.SimpleNamespace(
+        get_run_state=lambda simulation_id: run_state,
+        get_public_run_state_dict=lambda state: public_payload,
+    )
+
+    payload = module.get_run_status("sim_waiting_completed")
+
+    assert payload["success"] is True
+    assert payload["data"] == public_payload

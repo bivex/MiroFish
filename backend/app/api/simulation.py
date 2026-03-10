@@ -1772,7 +1772,7 @@ def get_run_status(simulation_id: str):
         
         return jsonify({
             "success": True,
-            "data": run_state.to_dict()
+            "data": SimulationRunner.get_public_run_state_dict(run_state)
         })
         
     except Exception as e:

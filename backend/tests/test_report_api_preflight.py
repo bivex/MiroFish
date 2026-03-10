@@ -23,6 +23,10 @@ def load_report_api_module():
     api_pkg.report_bp = BlueprintStub()
     sys.modules["app.api"] = api_pkg
 
+    services_pkg = types.ModuleType("app.services")
+    services_pkg.__path__ = [str(ROOT / "app" / "services")]
+    sys.modules["app.services"] = services_pkg
+
     flask_module = types.ModuleType("flask")
     flask_module.request = types.SimpleNamespace(get_json=lambda: {})
     flask_module.jsonify = lambda payload: payload
@@ -43,6 +47,10 @@ def load_report_api_module():
     factory_module.get_report_tools_service = lambda graph_backend=None: object()
     sys.modules["app.services.graph_backend_factory"] = factory_module
 
+    sys.modules["app.services.mirofish_writeback_bridge"] = types.SimpleNamespace(
+        try_post_report_writeback=lambda report, graph_backend=None: {"enabled": False, "skipped": True}
+    )
+
     report_agent_module = types.ModuleType("app.services.report_agent")
     report_agent_module.ReportAgent = object
     report_agent_module.ReportManager = types.SimpleNamespace(get_report_by_simulation=lambda simulation_id: None)
@@ -61,6 +69,10 @@ def load_report_api_module():
         @classmethod
         def get_run_state(cls, simulation_id):
             return cls.run_state
+
+        @classmethod
+        def get_public_runner_status(cls, run_state):
+            return getattr(getattr(run_state, "runner_status", None), "value", "idle")
 
     simulation_runner_module.SimulationRunner = SimulationRunner
     sys.modules["app.services.simulation_runner"] = simulation_runner_module

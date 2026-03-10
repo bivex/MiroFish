@@ -4,6 +4,13 @@
 """
 
 import os
+
+
+def _optional_int_env(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return None
+    return int(raw)
 from dotenv import load_dotenv
 
 # 加载项目根目录的 .env 文件
@@ -71,6 +78,14 @@ class Config:
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
+
+    # Optional loreSystem write-back bridge（默认关闭）
+    MIROFISH_WRITEBACK_ENABLED = os.environ.get('MIROFISH_WRITEBACK_ENABLED', 'false').lower() == 'true'
+    MIROFISH_WRITEBACK_BASE_URL = os.environ.get('MIROFISH_WRITEBACK_BASE_URL', 'http://127.0.0.1:8080')
+    MIROFISH_WRITEBACK_TIMEOUT_SECONDS = float(os.environ.get('MIROFISH_WRITEBACK_TIMEOUT_SECONDS', '10'))
+    MIROFISH_WRITEBACK_AUTO_PROMOTE_ENABLED = os.environ.get('MIROFISH_WRITEBACK_AUTO_PROMOTE_ENABLED', 'false').lower() == 'true'
+    MIROFISH_WRITEBACK_AUTO_PROMOTE_TENANT_ID = _optional_int_env('MIROFISH_WRITEBACK_AUTO_PROMOTE_TENANT_ID')
+    MIROFISH_WRITEBACK_AUTO_PROMOTE_WORLD_ID = _optional_int_env('MIROFISH_WRITEBACK_AUTO_PROMOTE_WORLD_ID')
 
     @classmethod
     def get_stage_model(cls, stage: str) -> str:
