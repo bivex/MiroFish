@@ -661,6 +661,10 @@ Focus on what develops inside this configured scenario. The simulation results a
    - Reflect the scenario outcome faithfully
    - Do not invent evidence that is not present in the simulation
    - If evidence is insufficient, say so clearly
+   - Scope every claim to the evidence you actually retrieved
+   - If retrieved facts mention only one actor, platform, round, or event thread, keep the claim at that exact scope
+   - Do not turn one or two facts into broad claims about "all actors", "the whole network", "power shifts", coordination, or causality unless multiple retrieved facts explicitly support that conclusion
+   - Ignore unrelated names, entities, or relationships that appear in tool output unless they clearly matter to the current section
 
 ═══════════════════════════════════════════════════════════════
 [Formatting rules - critical]
@@ -763,7 +767,8 @@ Strictly forbidden:
    ```
 5. Maintain logical continuity with the other sections
 6. Read previously completed sections carefully and avoid repeating the same points
-7. Do not add any headings. Use **bold text** instead of subsection titles."""
+7. Do not add any headings. Use **bold text** instead of subsection titles.
+8. When evidence is partial, use narrow wording such as "the retrieved evidence shows", "in the current retrieved snapshot", or "no retrieved evidence here shows ..." instead of filling in missing context."""
 
 SECTION_USER_PROMPT_TEMPLATE = """\
 Previously completed sections (read carefully and avoid repetition):
@@ -778,6 +783,8 @@ Previously completed sections (read carefully and avoid repetition):
 2. You must call tools before writing the final section
 3. Mix different tools when helpful instead of using only one
 4. The report content must come from retrieved simulation evidence, not from your own knowledge
+5. Do not generalize from one retrieved fact into a claim about all actors, all platforms, or the full scenario unless the retrieved evidence explicitly supports that broader scope
+6. If the evidence is partial or mixed, say that clearly instead of smoothing it into a confident narrative
 
 [Format warning - must follow]
 - Do not write any headings (#, ##, ###, ####, etc.)
@@ -803,6 +810,8 @@ Tools used: {tool_calls_count}/{max_tool_calls} (used so far: {used_tools_str}){
 - If the evidence is sufficient, output the section with the prefix "Final Answer:"
 - If you still need evidence, call one more tool
 - Read any `diagnostics` fields carefully. If fallback was used or evidence is sparse, say that explicitly and do not overclaim.
+- Scope claims to the facts shown here only. Do not generalize to other actors, platforms, rounds, or power dynamics unless the retrieved evidence explicitly shows them.
+- If you have only partial evidence, write that the evidence is limited instead of filling in the gaps.
 ═══════════════════════════════════════════════════════════════"""
 
 REACT_INSUFFICIENT_TOOLS_MSG = (
@@ -817,12 +826,16 @@ REACT_INSUFFICIENT_TOOLS_MSG_ALT = (
 
 REACT_TOOL_LIMIT_MSG = (
     "You have reached the tool-call limit ({tool_calls_count}/{max_tool_calls}) and cannot call more tools. "
-    'Now output the section immediately using the prefix "Final Answer:" and only the evidence already collected.'
+    'Now output the section immediately using the prefix "Final Answer:" and only the evidence already collected. '
+    'If that evidence is partial, say so explicitly and keep every claim narrow.'
 )
 
 REACT_UNUSED_TOOLS_HINT = "\nTip: you have not used these tools yet: {unused_list}. Consider mixing tools for broader evidence."
 
-REACT_FORCE_FINAL_MSG = "The tool-call phase is over. Output Final Answer now and write the section strictly from the evidence already collected."
+REACT_FORCE_FINAL_MSG = (
+    "The tool-call phase is over. Output Final Answer now and write the section strictly from the evidence already collected. "
+    "Keep claims at the exact scope of the retrieved facts, and if the evidence is partial, say that clearly instead of guessing."
+)
 
 # ── Chat prompt ──
 
@@ -1763,6 +1776,8 @@ class ReportAgent:
         for line in grounded_lines[:8]:
             lines.append(f"- {line}")
         lines.append("Use only the grounded facts above for narrative synthesis.")
+        lines.append("Do not generalize to other actors, platforms, rounds, or structural outcomes unless those facts are explicitly shown above.")
+        lines.append("If the evidence is partial, say that it is limited instead of filling in the gaps.")
         return "\n".join(lines)
 
     def _build_tool_evidence_summary(self, tool_name: str, result: Any) -> Dict[str, Any]:

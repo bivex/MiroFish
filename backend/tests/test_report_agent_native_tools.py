@@ -646,8 +646,94 @@ def test_execute_tool_payload_prefers_runtime_facts_for_cognee_tool_text():
     assert "DocumentChunk" not in payload["text"]
     assert "trace_created_at" not in payload["text"]
     assert "WorldRule:" not in payload["text"]
+    assert "Do not generalize to other actors, platforms, rounds, or structural outcomes" in payload["text"]
+    assert "If the evidence is partial, say that it is limited" in payload["text"]
     assert payload["evidence"]["meaningful"] is True
     assert payload["evidence"]["grounded_line_count"] == 1
+
+
+def test_generate_section_react_injects_narrow_grounding_rules_into_llm_messages():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def __init__(self):
+            self.responses = iter([
+                '<tool_call>{"name": "insight_forge", "parameters": {"query": "institutional response"}}</tool_call>',
+                '<tool_call>{"name": "panorama_search", "parameters": {"query": "guard statements"}}</tool_call>',
+                '<tool_call>{"name": "quick_search", "parameters": {"query": "royal court decree", "limit": 5}}</tool_call>',
+                'Final Answer: The retrieved evidence shows a narrow official response in the current snapshot.',
+            ])
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            return next(self.responses)
+
+    class ToolsStub:
+        def insight_forge(self, **kwargs):
+            return types.SimpleNamespace(
+                semantic_facts=[],
+                entity_insights=[],
+                relationship_chains=[],
+                diagnostics={"evidence_sources": ["runtime_actions"]},
+                to_text=lambda: "Current Key Memory (0)",
+            )
+
+        def panorama_search(self, **kwargs):
+            return types.SimpleNamespace(
+                active_facts=[],
+                all_nodes=[],
+                all_edges=[],
+                diagnostics={"evidence_sources": ["runtime_actions"]},
+                to_text=lambda: "Active Memory (0)",
+            )
+
+        def quick_search(self, **kwargs):
+            return types.SimpleNamespace(
+                facts=[
+                    "[round 10] [twitter] Royal Court posted that the decree remains valid.",
+                ],
+                nodes=[],
+                edges=[],
+                total_count=1,
+                diagnostics={"evidence_sources": ["runtime_actions"]},
+                to_text=lambda: "Search Results\n1 fact\n[round 10] [twitter] Royal Court posted that the decree remains valid.",
+            )
+
+        def get_runtime_evidence(self, simulation_id, limit=10):
+            return {"simulation_id": simulation_id, "has_runtime_evidence": True}
+
+    llm = LLMStub()
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_prompt_guardrails",
+        simulation_requirement="Analyze official messaging.",
+        llm_client=llm,
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    outline = module.ReportOutline(
+        title="Institutional Report",
+        summary="Use retrieved evidence",
+        sections=[module.ReportSection(title="Institutional Reactions")],
+    )
+
+    content = agent._generate_section_react(
+        section=outline.sections[0],
+        outline=outline,
+        previous_sections=[],
+        section_index=0,
+    )
+
+    assert content == "The retrieved evidence shows a narrow official response in the current snapshot."
+
+    first_system_prompt = llm.calls[0]["messages"][0]["content"]
+    last_user_message = llm.calls[-1]["messages"][-1]["content"]
+
+    assert "If retrieved facts mention only one actor, platform, round, or event thread, keep the claim at that exact scope" in first_system_prompt
+    assert "Do not generalize to other actors, platforms, rounds, or structural outcomes unless those facts are explicitly shown above." in last_user_message
+    assert "If the evidence is partial, say that it is limited instead of filling in the gaps." in last_user_message
 
 
 def test_chat_returns_only_retrieved_facts_when_tool_results_exist():
