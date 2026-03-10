@@ -25,6 +25,49 @@ _META_RE = re.compile(r'^(schema_version|world_id|world_version|scenario_id):\s*
 _RUMOR_RE = re.compile(r'\b(rumou?r|claim|alleg(?:ation|ed)?|speculat(?:ion|e|ive)|whisper|gossip|deny|denial)\b', re.IGNORECASE)
 _NEGATIVE_RELATIONSHIP_RE = re.compile(r'\b(blame|distrust|accus|critic|clash|conflict|tension|feud|threat|denounce)\b', re.IGNORECASE)
 _POSITIVE_RELATIONSHIP_RE = re.compile(r'\b(ally|support|coordina(?:te|tion)|assist|back|trust|protect|cooperate)\b', re.IGNORECASE)
+_MARKDOWN_QUOTE_RE = re.compile(r'^\s*>\s*')
+_MARKDOWN_LIST_RE = re.compile(r'^\s*[-*]\s+')
+_LOCATION_SUFFIX_RE = re.compile(
+    r'\b([A-Z][\w’\'\-]+(?:\s+(?:of|the|and)\s+[A-Z][\w’\'\-]+)*\s+'
+    r'(?:Palace|Harbor|Harbour|Dock(?:s)?|District|Quarter|Archives|Temple|Castle|Bazaar|Port|Bay|Keep|Plaza|Bridge|Gate|Tower|Village|City|Town|Forest|Mountain|Cave|Tavern|Inn|Shop|Ruins))\b'
+)
+_LOCATION_OF_RE = re.compile(
+    r'\b((?:Market|Port|Harbor|Harbour|City|Town|District|Quarter|Temple|Castle|Fort|House)\s+of\s+[A-Z][\w’\'\-]+(?:\s+[A-Z][\w’\'\-]+)*)\b'
+)
+_FACTION_SUFFIX_RE = re.compile(
+    r'\b([A-Z][\w’\'\-]+(?:\s+(?:of|the|and)\s+[A-Z][\w’\'\-]+)*\s+'
+    r'(?:Court|Council|Guard|Guild|Union|Order|Company|Committee|Administration|Ministry|Watch|Legion|Brotherhood|Syndicate|Fleet|Authority))\b'
+)
+_CHARACTER_TITLES: tuple[tuple[str, str], ...] = (
+    ('town crier', 'Town Crier'),
+    ('lord commander', 'Lord Commander'),
+    ('dockmaster', 'Dockmaster'),
+    ('dockworker', 'Dockworker'),
+    ('archivist', 'Archivist'),
+    ('chancellor', 'Chancellor'),
+    ('captain', 'Captain'),
+    ('commander', 'Commander'),
+    ('general', 'General'),
+    ('princess', 'Princess'),
+    ('prince', 'Prince'),
+    ('queen', 'Queen'),
+    ('king', 'King'),
+    ('lord', 'Lord'),
+    ('lady', 'Lady'),
+    ('master', 'Master'),
+    ('mistress', 'Mistress'),
+    ('sir', 'Sir'),
+    ('dame', 'Dame'),
+)
+_CHARACTER_TITLE_PATTERN = '|'.join(re.escape(title) for title, _ in _CHARACTER_TITLES)
+_CHARACTER_RE = re.compile(
+    rf'\b(((?i:{_CHARACTER_TITLE_PATTERN}))\s+[A-Z][\w’\'\-]+(?:\s+[A-Z][\w’\'\-]+)?)\b',
+)
+_INTERVIEW_AGENT_HEADER_RE = re.compile(r'^\s*\*\*[^*]+\*\*\s*\([^)]*\)\s*$')
+_INTERVIEW_AGENT_HEADER_CAPTURE_RE = re.compile(r'^\s*\*\*([^*]+)\*\*\s*\([^)]*\)\s*$')
+_INTERVIEW_QUESTION_RE = re.compile(r'^\s*\*\*Q:\*\*\s*(.*)$', re.IGNORECASE)
+_INTERVIEW_ANSWER_RE = re.compile(r'^\s*\*\*A:\*\*\s*(.*)$', re.IGNORECASE)
+_INTERVIEW_QUOTES_RE = re.compile(r'^\s*\*\*(?:Key\s+Quotes?|关键引言):?\*\*\s*$', re.IGNORECASE)
 _CANONICAL_ID_OFFSETS = {
     'Character': 100000,
     'Faction': 200000,
@@ -203,6 +246,455 @@ def _trim_text(value: Any, *, limit: int = 240) -> str:
     return text[:limit]
 
 
+def _clean_report_line(raw_line: Any) -> str:
+    line = str(raw_line or '').replace('\u202f', ' ').replace('\xa0', ' ').strip()
+    if not line or line == '---' or line.startswith('#'):
+        return ''
+    line = _MARKDOWN_QUOTE_RE.sub('', line)
+    line = _MARKDOWN_LIST_RE.sub('', line)
+    line = line.replace('**', '').replace('__', '').replace('`', '')
+    line = re.sub(r'\[(.*?)\]\([^)]*\)', r'\1', line)
+    return ' '.join(line.split())
+
+
+def _normalize_candidate_name(value: Any) -> str:
+    return ' '.join(str(value or '').replace('\u202f', ' ').replace('\xa0', ' ').split()).strip(' .,:;!?()[]{}"\'')
+
+
+def _character_core_name(value: Any) -> str:
+    name = _norm(_normalize_candidate_name(value))
+    if not name:
+        return ''
+    for title, _display in _CHARACTER_TITLES:
+        prefix = f'{title} '
+        if name.startswith(prefix):
+            return name[len(prefix):].strip()
+    return name
+
+
+def _normalize_character_candidate_name(value: Any) -> str:
+    name = _normalize_candidate_name(value)
+    if not name:
+        return ''
+    lowered = _norm(name)
+    words = name.split()
+    for title, display in _CHARACTER_TITLES:
+        title_parts = title.split()
+        if lowered.startswith(f'{title} '):
+            remainder = ' '.join(words[len(title_parts):]).strip()
+            return f'{display} {remainder}'.strip()
+    return name
+
+
+def _extract_character_title(name: str) -> str | None:
+    lowered = _norm(name)
+    for title, display in _CHARACTER_TITLES:
+        if lowered.startswith(f'{title} '):
+            return display
+    return None
+
+
+def _report_to_dict(report: Any) -> dict[str, Any]:
+    if hasattr(report, 'to_dict') and callable(report.to_dict):
+        data = report.to_dict()
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _clean_interview_line(raw_line: Any) -> str:
+    text = _clean_report_line(raw_line)
+    normalized = _norm(text)
+    if not text:
+        return ''
+    if normalized in {'q:', 'a:'}:
+        return ''
+    if normalized.startswith('简介:') or normalized.startswith('bio:'):
+        return ''
+    if normalized in {
+        'twitter平台回答',
+        'reddit平台回答',
+        'twitter response',
+        'reddit response',
+        'key quotes:',
+        'key quotes',
+        '关键引言:',
+        '关键引言',
+    }:
+        return ''
+    if normalized.startswith('q: ') or normalized.startswith('a: '):
+        return text[3:].strip()
+    return text
+
+
+def _collect_interview_payloads(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    if depth > 3:
+        return []
+    payloads: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        interviews = value.get('interviews')
+        if isinstance(interviews, list):
+            payloads.append(value)
+        for key in ('interview_result', 'interview_results', 'data', 'result', 'tool_results'):
+            nested = value.get(key)
+            if isinstance(nested, dict | list):
+                payloads.extend(_collect_interview_payloads(nested, depth=depth + 1))
+    elif isinstance(value, list):
+        for item in value[:20]:
+            payloads.extend(_collect_interview_payloads(item, depth=depth + 1))
+    deduped: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for payload in payloads:
+        marker = id(payload)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        deduped.append(payload)
+    return deduped
+
+
+def _interview_speaker_name(interview: dict[str, Any]) -> str:
+    return _normalize_candidate_name(
+        interview.get('agent_name')
+        or interview.get('speaker_name')
+        or interview.get('respondent')
+        or interview.get('name')
+        or ''
+    )
+
+
+def _iter_structured_interview_mentions(report: Any) -> list[dict[str, Any]]:
+    report_dict = _report_to_dict(report)
+    mentions: list[dict[str, Any]] = []
+    for payload in _collect_interview_payloads(report_dict):
+        interviews = payload.get('interviews') or []
+        if not isinstance(interviews, list):
+            continue
+        for interview in interviews:
+            if hasattr(interview, 'to_dict') and callable(interview.to_dict):
+                interview = interview.to_dict()
+            if not isinstance(interview, dict):
+                continue
+            speaker_name = _interview_speaker_name(interview)
+            response = interview.get('response') or interview.get('answer') or ''
+            for raw_line in str(response or '').splitlines():
+                text = _clean_interview_line(raw_line)
+                if text:
+                    mentions.append({
+                        'text': text,
+                        'quoted': False,
+                        'source_type': 'interview_response_entity',
+                        'speaker_name': speaker_name,
+                    })
+            for raw_quote in (interview.get('key_quotes') or interview.get('quotes') or []):
+                text = _clean_interview_line(raw_quote)
+                if text:
+                    mentions.append({
+                        'text': text,
+                        'quoted': True,
+                        'source_type': 'interview_quote_entity',
+                        'speaker_name': speaker_name,
+                    })
+    return mentions
+
+
+def _iter_markdown_interview_mentions(report: Any) -> list[dict[str, Any]]:
+    markdown = str(getattr(report, 'markdown_content', '') or '').strip()
+    if not markdown:
+        return []
+    mentions: list[dict[str, Any]] = []
+    in_interview_block = False
+    collecting_answer = False
+    collecting_quotes = False
+    current_speaker_name = ''
+
+    for raw_line in markdown.splitlines():
+        line = str(raw_line or '').rstrip()
+        if _INTERVIEW_AGENT_HEADER_RE.match(line):
+            header_match = _INTERVIEW_AGENT_HEADER_CAPTURE_RE.match(line)
+            current_speaker_name = _normalize_candidate_name(header_match.group(1) if header_match else '')
+            in_interview_block = True
+            collecting_answer = False
+            collecting_quotes = False
+            continue
+        if not in_interview_block:
+            continue
+        if _INTERVIEW_QUESTION_RE.match(line):
+            collecting_answer = False
+            collecting_quotes = False
+            continue
+        answer_match = _INTERVIEW_ANSWER_RE.match(line)
+        if answer_match:
+            collecting_answer = True
+            collecting_quotes = False
+            text = _clean_interview_line(answer_match.group(1))
+            if text:
+                mentions.append({
+                    'text': text,
+                    'quoted': False,
+                    'source_type': 'interview_response_entity',
+                    'speaker_name': current_speaker_name,
+                })
+            continue
+        if _INTERVIEW_QUOTES_RE.match(line):
+            collecting_quotes = True
+            collecting_answer = False
+            continue
+        if collecting_quotes:
+            if _MARKDOWN_QUOTE_RE.match(line):
+                text = _clean_interview_line(line)
+                if text:
+                    mentions.append({
+                        'text': text,
+                        'quoted': True,
+                        'source_type': 'interview_quote_entity',
+                        'speaker_name': current_speaker_name,
+                    })
+                continue
+            if line.strip().startswith('**'):
+                collecting_quotes = False
+            elif not line.strip():
+                continue
+            else:
+                collecting_quotes = False
+        if collecting_answer:
+            if _INTERVIEW_AGENT_HEADER_RE.match(line) or _INTERVIEW_QUESTION_RE.match(line) or _INTERVIEW_QUOTES_RE.match(line):
+                collecting_answer = False
+                if _INTERVIEW_AGENT_HEADER_RE.match(line):
+                    in_interview_block = True
+                if _INTERVIEW_QUOTES_RE.match(line):
+                    collecting_quotes = True
+                continue
+            text = _clean_interview_line(line)
+            if text:
+                mentions.append({
+                    'text': text,
+                    'quoted': False,
+                    'source_type': 'interview_response_entity',
+                    'speaker_name': current_speaker_name,
+                })
+    return mentions
+
+
+def _iter_report_mentions(report: Any) -> list[dict[str, Any]]:
+    mentions: list[dict[str, Any]] = []
+    markdown = str(getattr(report, 'markdown_content', '') or '').strip()
+    if not markdown:
+        summary = str(getattr(getattr(report, 'outline', None), 'summary', '') or '').strip()
+        if summary:
+            mentions.append({'text': _clean_report_line(summary), 'quoted': False, 'source_type': 'report_markdown_entity'})
+        return [item for item in mentions if item.get('text')]
+
+    for raw_line in markdown.splitlines():
+        raw_line_str = str(raw_line or '')
+        if (
+            _INTERVIEW_AGENT_HEADER_RE.match(raw_line_str.rstrip())
+            or _INTERVIEW_QUESTION_RE.match(raw_line_str.rstrip())
+            or _INTERVIEW_ANSWER_RE.match(raw_line_str.rstrip())
+            or _INTERVIEW_QUOTES_RE.match(raw_line_str.rstrip())
+        ):
+            continue
+        text = _clean_report_line(raw_line)
+        if not text:
+            continue
+        mentions.append({
+            'text': text,
+            'quoted': bool(_MARKDOWN_QUOTE_RE.match(raw_line_str)),
+            'source_type': 'report_markdown_entity',
+        })
+    return mentions
+
+
+def _infer_location_type(name: str, context: str) -> str:
+    signature = _norm(f'{name} {context}')
+    if any(token in signature for token in ('palace', 'castle', 'keep', 'fort')):
+        return 'castle'
+    if 'temple' in signature:
+        return 'temple'
+    if any(token in signature for token in ('market', 'bazaar', 'shop')):
+        return 'shop'
+    if any(token in signature for token in ('city', 'town')):
+        return 'city'
+    if 'village' in signature:
+        return 'village'
+    if 'forest' in signature:
+        return 'forest'
+    if 'mountain' in signature:
+        return 'mountain'
+    if 'cave' in signature:
+        return 'cave'
+    if any(token in signature for token in ('tavern', 'inn')):
+        return 'tavern'
+    if 'ruins' in signature:
+        return 'ruins'
+    return 'landmark'
+
+
+def _infer_faction_type(name: str, context: str) -> str:
+    signature = _norm(f'{name} {context}')
+    if any(token in signature for token in ('guard', 'watch', 'legion', 'fleet')):
+        return 'military'
+    if any(token in signature for token in ('guild', 'union', 'company', 'merchant', 'trader')):
+        return 'merchant'
+    if any(token in signature for token in ('order', 'temple', 'church', 'cult')):
+        return 'religious'
+    if any(token in signature for token in ('syndicate', 'assassin', 'criminal', 'smuggler')):
+        return 'criminal'
+    if any(token in signature for token in ('arcane', 'mage', 'magical')):
+        return 'magical'
+    if any(token in signature for token in ('secret', 'conspiracy', 'hidden')):
+        return 'secret'
+    return 'political'
+
+
+def _infer_faction_alignment(name: str, context: str) -> str:
+    signature = _norm(f'{name} {context}')
+    if any(token in signature for token in ('criminal', 'assassin', 'syndicate')):
+        return 'evil'
+    if any(token in signature for token in ('riot', 'chaos', 'chaotic', 'insurrection')):
+        return 'chaotic'
+    if any(token in signature for token in ('sanctuary', 'relief', 'charity', 'protect')):
+        return 'good'
+    return 'neutral'
+
+
+def _infer_character_status(_name: str, _context: str) -> str:
+    return 'active'
+
+
+def _derive_new_entity_candidates_from_report(
+    *,
+    report: Any,
+    actors: list[dict[str, Any]],
+    organizations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    known_names = {
+        _norm(item.get('name'))
+        for item in (actors + organizations)
+        if _norm(item.get('name'))
+    }
+    known_character_names = {
+        _norm(item.get('name'))
+        for item in actors
+        if _norm(item.get('name'))
+    }
+    known_character_cores = {
+        _character_core_name(item.get('name'))
+        for item in actors
+        if _character_core_name(item.get('name'))
+    }
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def register(target_type: str, name: str, excerpt: str, *, quoted: bool, source_type: str) -> None:
+        normalized_name = _norm(name)
+        core_name = _character_core_name(name) if target_type == 'Character' else ''
+        if not normalized_name or normalized_name in known_names or len(name.split()) < 2:
+            return
+        if target_type == 'Character' and (
+            normalized_name in known_character_names
+            or (core_name and core_name in known_character_names)
+            or (core_name and core_name in known_character_cores)
+        ):
+            return
+        key = (target_type, normalized_name)
+        bucket = grouped.setdefault(
+            key,
+            {
+                'target_canonical_type': target_type,
+                'name': name,
+                'mentions': [],
+                'quoted_mentions': 0,
+                'narrative_mentions': 0,
+                'source_types': set(),
+            },
+        )
+        if excerpt not in bucket['mentions']:
+            bucket['mentions'].append(excerpt)
+        if quoted:
+            bucket['quoted_mentions'] += 1
+        else:
+            bucket['narrative_mentions'] += 1
+        bucket['source_types'].add(source_type)
+
+    for mention in _iter_report_mentions(report):
+        text = str(mention.get('text') or '').strip()
+        if not text:
+            continue
+        quoted = bool(mention.get('quoted'))
+        source_type = str(mention.get('source_type') or 'report_markdown_entity')
+        for pattern in (_LOCATION_OF_RE, _LOCATION_SUFFIX_RE):
+            for match in pattern.finditer(text):
+                register('Location', _normalize_candidate_name(match.group(1)), text, quoted=quoted, source_type=source_type)
+        for match in _FACTION_SUFFIX_RE.finditer(text):
+            register('Faction', _normalize_candidate_name(match.group(1)), text, quoted=quoted, source_type=source_type)
+        for match in _CHARACTER_RE.finditer(text):
+            register('Character', _normalize_character_candidate_name(match.group(1)), text, quoted=quoted, source_type=source_type)
+
+    for mention in _iter_structured_interview_mentions(report) + _iter_markdown_interview_mentions(report):
+        text = str(mention.get('text') or '').strip()
+        if not text:
+            continue
+        quoted = bool(mention.get('quoted'))
+        source_type = str(mention.get('source_type') or 'interview_response_entity')
+        for pattern in (_LOCATION_OF_RE, _LOCATION_SUFFIX_RE):
+            for match in pattern.finditer(text):
+                register('Location', _normalize_candidate_name(match.group(1)), text, quoted=quoted, source_type=source_type)
+        for match in _FACTION_SUFFIX_RE.finditer(text):
+            register('Faction', _normalize_candidate_name(match.group(1)), text, quoted=quoted, source_type=source_type)
+        for match in _CHARACTER_RE.finditer(text):
+            register('Character', _normalize_character_candidate_name(match.group(1)), text, quoted=quoted, source_type=source_type)
+
+    candidates: list[dict[str, Any]] = []
+    for item in grouped.values():
+        mention_count = len(item['mentions'])
+        narrative_mentions = int(item['narrative_mentions'])
+        if mention_count < 2 and narrative_mentions == 0:
+            continue
+        excerpt = next((entry for entry in item['mentions'] if entry), item['name'])
+        source_types = set(item.get('source_types') or [])
+        source_label = 'Interview mentions' if source_types and source_types <= {'interview_response_entity', 'interview_quote_entity'} else (
+            'Report/interview mentions' if 'report_markdown_entity' in source_types and len(source_types) > 1 else 'Report mentions'
+        )
+        summary = _trim_text(f'{source_label} {item["name"]}: {excerpt}', limit=320)
+        confidence = min(
+            0.88,
+            0.71
+            + (0.05 if narrative_mentions else 0.0)
+            + (0.03 if 'interview_response_entity' in source_types else 0.0)
+            + 0.04 * max(0, mention_count - 1),
+        )
+        proposed_change: dict[str, Any] = {
+            'description': _trim_text(excerpt, limit=320),
+            'source_excerpt': _trim_text(excerpt, limit=320),
+            'mention_count': mention_count,
+        }
+        if item['target_canonical_type'] == 'Location':
+            proposed_change['location_type'] = _infer_location_type(item['name'], excerpt)
+        elif item['target_canonical_type'] == 'Faction':
+            proposed_change['faction_type'] = _infer_faction_type(item['name'], excerpt)
+            proposed_change['alignment'] = _infer_faction_alignment(item['name'], excerpt)
+        elif item['target_canonical_type'] == 'Character':
+            proposed_change['status'] = _infer_character_status(item['name'], excerpt)
+            title = _extract_character_title(item['name'])
+            if title:
+                proposed_change['character_title'] = title
+        else:
+            continue
+        candidates.append({
+            'target_canonical_type': item['target_canonical_type'],
+            'name': item['name'],
+            'summary': summary,
+            'description': _trim_text(excerpt, limit=320),
+            'confidence': confidence,
+            'timestamp': _utc_iso(report.completed_at),
+            'mention_count': mention_count,
+            'source_types': sorted(source_types),
+            'proposed_change': proposed_change,
+        })
+
+    return sorted(candidates, key=lambda item: (str(item.get('target_canonical_type') or ''), _norm(item.get('name'))))
+
+
 def _actor_directory(actors: list[dict[str, Any]]) -> list[dict[str, str]]:
     directory: list[dict[str, str]] = []
     for actor in actors:
@@ -245,8 +737,11 @@ def _append_collection_evidence(
     collection_name: str,
     evidence_type: str,
     source_type: str,
+    source_type_filter: str | None = None,
 ) -> None:
     for index, item in enumerate(items):
+        if source_type_filter and source_type_filter not in {str(value) for value in (item.get('source_types') or [])}:
+            continue
         evidence_payload = {
             'collection': collection_name,
             'index': index,
@@ -344,6 +839,7 @@ def _build_candidate_deltas(
     emergent_events: list[dict[str, Any]],
     rumor_candidates: list[dict[str, Any]],
     relationship_changes: list[dict[str, Any]],
+    new_entity_candidates: list[dict[str, Any]],
     runtime_evidence: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     collection_evidence = _index_collection_evidence_ids(runtime_evidence)
@@ -353,11 +849,12 @@ def _build_candidate_deltas(
         if str(item.get('source_type') or '').strip() == 'mirofish_action_log' and str(item.get('evidence_id') or '').strip()
     ]
 
-    def support_ids(*keys: tuple[str, int]) -> list[str]:
+    def support_ids(*keys: tuple[str, int], include_action_log: bool = True) -> list[str]:
         ids: list[str] = []
         for key in keys:
             ids.extend(collection_evidence.get(key, []))
-        ids.extend(action_evidence_ids[:2])
+        if include_action_log:
+            ids.extend(action_evidence_ids[:2])
         deduped: list[str] = []
         seen: set[str] = set()
         for evidence_id in ids:
@@ -418,6 +915,24 @@ def _build_candidate_deltas(
                 evidence_ids=evidence_ids,
                 source_refs=[{'collection': 'relationship_delta', 'index': index}],
                 confidence=float(item.get('confidence') or 0.62),
+            )
+        )
+
+    for index, item in enumerate(new_entity_candidates):
+        evidence_ids = support_ids(('new_entity_candidate', index), include_action_log=False)
+        candidates.append(
+            _candidate_record(
+                world_id=world_id,
+                scenario_id=scenario_id,
+                run_id=run_id,
+                candidate_type='new_entity_candidate',
+                target_canonical_type=str(item.get('target_canonical_type') or '').strip() or 'Location',
+                name=str(item.get('name') or 'Simulation entity').strip() or 'Simulation entity',
+                summary=str(item.get('summary') or item.get('description') or item.get('name') or 'Simulation entity').strip(),
+                proposed_change=dict(item.get('proposed_change') or {}),
+                evidence_ids=evidence_ids,
+                source_refs=[{'collection': 'new_entity_candidate', 'index': index}],
+                confidence=float(item.get('confidence') or 0.72),
             )
         )
     return candidates
@@ -506,41 +1021,84 @@ def _derive_rumor_candidates(
         if str(item.get('id') or '').strip()
     ]
 
+    def register(
+        summary_text: str,
+        *,
+        source_name: str | None,
+        actor_refs: list[str],
+        timestamp: Any,
+        confidence: float,
+        source_type: str,
+        platform: str | None = None,
+        action_type: str | None = None,
+    ) -> bool:
+        summary = _trim_text(summary_text, limit=320)
+        signature = _norm(summary)
+        if not signature or signature in seen:
+            return False
+        seen.add(signature)
+        rumor_candidates.append({
+            'name': _trim_text(
+                f'Rumor signal from {source_name}' if source_name else 'Simulation rumor',
+                limit=120,
+            ),
+            'summary': summary,
+            'text': summary,
+            'actor_refs': [ref for ref in actor_refs if ref][:2],
+            'source_name': source_name,
+            'timestamp': _utc_iso(timestamp or report.completed_at),
+            'confidence': confidence,
+            'source_types': [source_type],
+            **({'platform': platform} if platform else {}),
+            **({'action_type': action_type} if action_type else {}),
+        })
+        return len(rumor_candidates) >= 3
+
     for action in actions:
         detail = _action_detail_text(action)
         if not _RUMOR_RE.search(detail):
             continue
         matched_ref = subject_lookup.get(_norm(action.agent_name))
-        summary = _trim_text(detail, limit=320)
-        signature = _norm(summary)
-        if not signature or signature in seen:
-            continue
-        seen.add(signature)
-        rumor_candidates.append({
-            'name': _trim_text(f'Rumor signal from {action.agent_name}', limit=120),
-            'summary': summary,
-            'text': summary,
-            'actor_refs': [matched_ref] if matched_ref else [],
-            'source_name': str(action.agent_name or '').strip() or None,
-            'timestamp': _utc_iso(action.timestamp),
-            'confidence': 0.72 if getattr(action, 'success', True) else 0.55,
-            'platform': action.platform,
-            'action_type': action.action_type,
-        })
-        if len(rumor_candidates) >= 3:
+        if register(
+            detail,
+            source_name=str(action.agent_name or '').strip() or None,
+            actor_refs=[matched_ref] if matched_ref else [],
+            timestamp=action.timestamp,
+            confidence=0.72 if getattr(action, 'success', True) else 0.55,
+            source_type='prediction_summary',
+            platform=getattr(action, 'platform', None),
+            action_type=getattr(action, 'action_type', None),
+        ):
             break
+
+    if len(rumor_candidates) < 3:
+        interview_mentions = _iter_structured_interview_mentions(report) + _iter_markdown_interview_mentions(report)
+        for mention in interview_mentions:
+            detail = str(mention.get('text') or '').strip()
+            if not _RUMOR_RE.search(detail):
+                continue
+            speaker_name = str(mention.get('speaker_name') or '').strip()
+            matched_ref = subject_lookup.get(_norm(speaker_name)) if speaker_name else None
+            if register(
+                detail,
+                source_name=speaker_name or getattr(getattr(report, 'outline', None), 'title', None),
+                actor_refs=[matched_ref] if matched_ref else [],
+                timestamp=report.completed_at,
+                confidence=0.66 if mention.get('quoted') else 0.63,
+                source_type=str(mention.get('source_type') or 'interview_response_entity'),
+            ):
+                break
 
     summary_text = str(getattr(getattr(report, 'outline', None), 'summary', '') or '').strip()
     if not rumor_candidates and _RUMOR_RE.search(summary_text):
-        rumor_candidates.append({
-            'name': _trim_text(f'Rumor surfaced in {getattr(getattr(report, "outline", None), "title", "report")}', limit=120),
-            'summary': _trim_text(summary_text, limit=320),
-            'text': _trim_text(summary_text, limit=320),
-            'actor_refs': fallback_refs[:1],
-            'source_name': getattr(getattr(report, 'outline', None), 'title', None),
-            'timestamp': _utc_iso(report.completed_at),
-            'confidence': 0.64,
-        })
+        register(
+            summary_text,
+            source_name=getattr(getattr(report, 'outline', None), 'title', None),
+            actor_refs=fallback_refs[:1],
+            timestamp=report.completed_at,
+            confidence=0.64,
+            source_type='prediction_summary',
+        )
     return rumor_candidates
 
 
@@ -589,10 +1147,48 @@ def _derive_emergent_events(
     }]
 
 
-def _derive_relationship_changes(*, actions: list[Any], actors: list[dict[str, Any]], subject_lookup: dict[str, str]) -> list[dict[str, Any]]:
+def _derive_relationship_changes(
+    *,
+    actions: list[Any],
+    report: Any,
+    actors: list[dict[str, Any]],
+    subject_lookup: dict[str, str],
+) -> list[dict[str, Any]]:
     actor_directory = _actor_directory(actors)
     relationship_changes: list[dict[str, Any]] = []
     seen_pairs: set[tuple[str, str]] = set()
+
+    def register(
+        *,
+        source_ref: str,
+        source_name: str,
+        target: dict[str, str],
+        detail: str,
+        timestamp: Any,
+        confidence: float,
+        source_type: str,
+    ) -> bool:
+        pair = tuple(sorted((source_ref, target['ref'])))
+        if pair in seen_pairs:
+            return False
+        seen_pairs.add(pair)
+        summary = _trim_text(detail, limit=320)
+        relationship_level = _relationship_level_from_text(detail)
+        relationship_changes.append({
+            'name': _trim_text(f'{source_name} reacts to {target["name"]}', limit=120),
+            'summary': summary,
+            'text': summary,
+            'actor_refs': [source_ref, target['ref']],
+            'character_from_ref': source_ref,
+            'character_to_ref': target['ref'],
+            'relationship_level': relationship_level,
+            'relationship_type': 'enemy' if relationship_level < 0 else ('friend' if relationship_level > 8 else 'neutral'),
+            'is_mutual': False,
+            'timestamp': _utc_iso(timestamp),
+            'confidence': confidence,
+            'source_types': [source_type],
+        })
+        return len(relationship_changes) >= 2
 
     for action in actions:
         source_ref = subject_lookup.get(_norm(action.agent_name))
@@ -600,26 +1196,37 @@ def _derive_relationship_changes(*, actions: list[Any], actors: list[dict[str, A
             continue
         detail = _action_detail_text(action)
         for target in _actor_mentions(detail, actor_directory, exclude_ref=source_ref):
-            pair = tuple(sorted((source_ref, target['ref'])))
-            if pair in seen_pairs:
-                continue
-            seen_pairs.add(pair)
-            summary = _trim_text(detail, limit=320)
-            relationship_level = _relationship_level_from_text(detail)
-            relationship_changes.append({
-                'name': _trim_text(f'{action.agent_name} reacts to {target["name"]}', limit=120),
-                'summary': summary,
-                'text': summary,
-                'actor_refs': [source_ref, target['ref']],
-                'character_from_ref': source_ref,
-                'character_to_ref': target['ref'],
-                'relationship_level': relationship_level,
-                'relationship_type': 'enemy' if relationship_level < 0 else ('friend' if relationship_level > 8 else 'neutral'),
-                'is_mutual': False,
-                'timestamp': _utc_iso(action.timestamp),
-                'confidence': 0.62,
-            })
-            if len(relationship_changes) >= 2:
+            if register(
+                source_ref=source_ref,
+                source_name=str(action.agent_name or '').strip() or 'Simulation actor',
+                target=target,
+                detail=detail,
+                timestamp=action.timestamp,
+                confidence=0.62,
+                source_type='relationship_delta',
+            ):
+                return relationship_changes
+
+    interview_mentions = _iter_structured_interview_mentions(report) + _iter_markdown_interview_mentions(report)
+    for mention in interview_mentions:
+        speaker_name = str(mention.get('speaker_name') or '').strip()
+        source_ref = subject_lookup.get(_norm(speaker_name)) if speaker_name else None
+        if not source_ref:
+            continue
+        detail = str(mention.get('text') or '').strip()
+        relationship_level = _relationship_level_from_text(detail)
+        if abs(relationship_level) < 30:
+            continue
+        for target in _actor_mentions(detail, actor_directory, exclude_ref=source_ref):
+            if register(
+                source_ref=source_ref,
+                source_name=speaker_name,
+                target=target,
+                detail=detail,
+                timestamp=report.completed_at,
+                confidence=0.66 if mention.get('quoted') else 0.64,
+                source_type=str(mention.get('source_type') or 'interview_response_entity'),
+            ):
                 return relationship_changes
     return relationship_changes
 
@@ -723,8 +1330,14 @@ def build_result_bundle(report: Any, *, graph_backend: str | None = None) -> dic
     )
     relationship_changes = _derive_relationship_changes(
         actions=actions,
+        report=report,
         actors=actors,
         subject_lookup=subject_lookup,
+    )
+    new_entity_candidates = _derive_new_entity_candidates_from_report(
+        report=report,
+        actors=actors,
+        organizations=organizations,
     )
 
     _append_collection_evidence(
@@ -737,6 +1350,31 @@ def build_result_bundle(report: Any, *, graph_backend: str | None = None) -> dic
         collection_name='prediction_summary',
         evidence_type='rumor_signal',
         source_type='prediction_summary',
+        source_type_filter='prediction_summary',
+    )
+    _append_collection_evidence(
+        runtime_evidence,
+        rumor_candidates,
+        world_id=world_id,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        report=report,
+        collection_name='prediction_summary',
+        evidence_type='rumor_signal',
+        source_type='interview_response_entity',
+        source_type_filter='interview_response_entity',
+    )
+    _append_collection_evidence(
+        runtime_evidence,
+        rumor_candidates,
+        world_id=world_id,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        report=report,
+        collection_name='prediction_summary',
+        evidence_type='rumor_signal',
+        source_type='interview_quote_entity',
+        source_type_filter='interview_quote_entity',
     )
     _append_collection_evidence(
         runtime_evidence,
@@ -759,6 +1397,67 @@ def build_result_bundle(report: Any, *, graph_backend: str | None = None) -> dic
         collection_name='relationship_delta',
         evidence_type='relationship_change',
         source_type='relationship_delta',
+        source_type_filter='relationship_delta',
+    )
+    _append_collection_evidence(
+        runtime_evidence,
+        relationship_changes,
+        world_id=world_id,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        report=report,
+        collection_name='relationship_delta',
+        evidence_type='relationship_change',
+        source_type='interview_response_entity',
+        source_type_filter='interview_response_entity',
+    )
+    _append_collection_evidence(
+        runtime_evidence,
+        relationship_changes,
+        world_id=world_id,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        report=report,
+        collection_name='relationship_delta',
+        evidence_type='relationship_change',
+        source_type='interview_quote_entity',
+        source_type_filter='interview_quote_entity',
+    )
+    _append_collection_evidence(
+        runtime_evidence,
+        new_entity_candidates,
+        world_id=world_id,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        report=report,
+        collection_name='new_entity_candidate',
+        evidence_type='runtime_observation',
+        source_type='report_markdown_entity',
+        source_type_filter='report_markdown_entity',
+    )
+    _append_collection_evidence(
+        runtime_evidence,
+        new_entity_candidates,
+        world_id=world_id,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        report=report,
+        collection_name='new_entity_candidate',
+        evidence_type='runtime_observation',
+        source_type='interview_response_entity',
+        source_type_filter='interview_response_entity',
+    )
+    _append_collection_evidence(
+        runtime_evidence,
+        new_entity_candidates,
+        world_id=world_id,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        report=report,
+        collection_name='new_entity_candidate',
+        evidence_type='runtime_observation',
+        source_type='interview_quote_entity',
+        source_type_filter='interview_quote_entity',
     )
     candidate_deltas = _build_candidate_deltas(
         world_id=world_id,
@@ -767,6 +1466,7 @@ def build_result_bundle(report: Any, *, graph_backend: str | None = None) -> dic
         emergent_events=emergent_events,
         rumor_candidates=rumor_candidates,
         relationship_changes=relationship_changes,
+        new_entity_candidates=new_entity_candidates,
         runtime_evidence=runtime_evidence,
     )
 
@@ -809,6 +1509,7 @@ def build_result_bundle(report: Any, *, graph_backend: str | None = None) -> dic
         'emergent_events': emergent_events,
         'relationship_changes': relationship_changes,
         'rumor_candidates': rumor_candidates,
+        'new_entity_candidates': new_entity_candidates,
         'actions_preview': [action.to_dict() for action in actions[:20]],
     }
 
@@ -827,6 +1528,7 @@ def build_result_bundle(report: Any, *, graph_backend: str | None = None) -> dic
         'emergent_events': emergent_events,
         'relationship_changes': relationship_changes,
         'rumor_candidates': rumor_candidates,
+        'new_entity_candidates': new_entity_candidates,
         'runtime_evidence': runtime_evidence,
         'candidate_deltas': candidate_deltas,
         'raw_payload': raw_payload,
