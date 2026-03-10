@@ -11,9 +11,11 @@ from . import simulation_bp
 from ..config import Config
 from ..services.graph_backend_factory import (
     get_entity_reader_service,
+    get_graph_builder_service,
     validate_graph_backend_requirements,
 )
 from ..services.oasis_profile_generator import OasisProfileGenerator
+from ..services.report_agent import ReportManager
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..utils.logger import get_logger
@@ -894,6 +896,37 @@ def _get_report_id_for_simulation(simulation_id: str) -> str:
         return None
 
 
+def _runner_status_value(run_state) -> str:
+    """兼容 Enum / str 的 runner_status 读取。"""
+    status = getattr(run_state, "runner_status", None)
+    return getattr(status, "value", status)
+
+
+def _prepare_simulation_for_deletion(simulation_id: str) -> list[str]:
+    """在删除前尽量停止/清理 simulation 相关运行状态。"""
+    errors = []
+
+    try:
+        if SimulationRunner.check_env_alive(simulation_id):
+            SimulationRunner.close_simulation_env(simulation_id, timeout=5)
+    except Exception as e:
+        errors.append(f"{simulation_id}: close-env failed: {e}")
+
+    try:
+        run_state = SimulationRunner.get_run_state(simulation_id)
+        if _runner_status_value(run_state) in {"running", "paused"}:
+            SimulationRunner.stop_simulation(simulation_id)
+    except Exception as e:
+        errors.append(f"{simulation_id}: stop failed: {e}")
+
+    try:
+        SimulationRunner.cleanup_simulation_logs(simulation_id)
+    except Exception as e:
+        errors.append(f"{simulation_id}: cleanup logs failed: {e}")
+
+    return errors
+
+
 @simulation_bp.route('/history', methods=['GET'])
 def get_simulation_history():
     """
@@ -1004,6 +1037,120 @@ def get_simulation_history():
         
     except Exception as e:
         logger.error(f"获取历史模拟失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/history', methods=['DELETE'])
+def delete_simulation_history():
+    """批量删除所有历史模拟及其关联资源。"""
+    try:
+        manager = SimulationManager()
+        simulations = manager.list_simulations()
+
+        if not simulations:
+            return jsonify({
+                "success": True,
+                "data": {
+                    "deleted": {
+                        "simulations": [],
+                        "reports": [],
+                        "projects": [],
+                        "graphs": []
+                    },
+                    "deleted_counts": {
+                        "simulations": 0,
+                        "reports": 0,
+                        "projects": 0,
+                        "graphs": 0
+                    },
+                    "errors": []
+                }
+            })
+
+        reports_to_delete = {}
+        projects_to_delete = {}
+        graphs_to_delete = {}
+
+        for sim in simulations:
+            project = ProjectManager.get_project(sim.project_id) if sim.project_id else None
+            if project and sim.project_id and sim.project_id not in projects_to_delete:
+                projects_to_delete[sim.project_id] = project
+
+            graph_id = sim.graph_id or getattr(project, 'graph_id', None)
+            graph_backend = sim.graph_backend or getattr(project, 'graph_backend', None) or Config.get_graph_backend()
+            if graph_id and graph_id not in graphs_to_delete:
+                graphs_to_delete[graph_id] = graph_backend
+
+            for report in ReportManager.list_reports(simulation_id=sim.simulation_id, limit=1000):
+                report_id = getattr(report, 'report_id', None)
+                if report_id:
+                    reports_to_delete[report_id] = report_id
+
+        deleted = {
+            "simulations": [],
+            "reports": [],
+            "projects": [],
+            "graphs": []
+        }
+        errors = []
+
+        for sim in simulations:
+            errors.extend(_prepare_simulation_for_deletion(sim.simulation_id))
+
+            try:
+                if manager.delete_simulation(sim.simulation_id):
+                    deleted["simulations"].append(sim.simulation_id)
+            except Exception as e:
+                msg = f"{sim.simulation_id}: delete simulation failed: {e}"
+                logger.warning(msg)
+                errors.append(msg)
+
+        for report_id in reports_to_delete:
+            try:
+                if ReportManager.delete_report(report_id):
+                    deleted["reports"].append(report_id)
+            except Exception as e:
+                msg = f"{report_id}: delete report failed: {e}"
+                logger.warning(msg)
+                errors.append(msg)
+
+        for project_id in projects_to_delete:
+            try:
+                if ProjectManager.delete_project(project_id):
+                    deleted["projects"].append(project_id)
+            except Exception as e:
+                msg = f"{project_id}: delete project failed: {e}"
+                logger.warning(msg)
+                errors.append(msg)
+
+        for graph_id, graph_backend in graphs_to_delete.items():
+            try:
+                builder = get_graph_builder_service(
+                    graph_backend=graph_backend,
+                    api_key=getattr(Config, 'ZEP_API_KEY', None)
+                )
+                builder.delete_graph(graph_id)
+                deleted["graphs"].append(graph_id)
+            except Exception as e:
+                msg = f"{graph_id}: delete graph failed: {e}"
+                logger.warning(msg)
+                errors.append(msg)
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "deleted": deleted,
+                "deleted_counts": {key: len(value) for key, value in deleted.items()},
+                "errors": errors
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"删除历史模拟失败: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),

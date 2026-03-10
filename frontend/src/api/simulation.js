@@ -185,3 +185,10 @@ export const getSimulationHistory = (limit = 20) => {
   return service.get('/api/simulation/history', { params: { limit } })
 }
 
+/**
+ * 删除全部历史模拟记录
+ */
+export const deleteAllSimulationHistory = () => {
+  return service.delete('/api/simulation/history')
+}
+

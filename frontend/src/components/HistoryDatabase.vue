@@ -27,9 +27,14 @@
         <div v-if="projects.length > 0 && !loading" class="section-updated">
           Latest run · {{ formatDate(projects[0]?.created_at) }} {{ formatTime(projects[0]?.created_at) }}
         </div>
-        <button class="refresh-button" type="button" @click="loadHistory" :disabled="loading">
-          {{ loading ? 'Refreshing…' : 'Refresh' }}
-        </button>
+        <div class="section-action-row">
+          <button class="refresh-button" type="button" @click="loadHistory" :disabled="loading || deletingHistory">
+            {{ loading ? 'Refreshing…' : 'Refresh' }}
+          </button>
+          <button class="delete-button" type="button" @click="deleteHistory" :disabled="loading || deletingHistory || projects.length === 0">
+            {{ deletingHistory ? 'Deleting…' : 'Delete all' }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -249,7 +254,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getSimulationHistory } from '../api/simulation'
+import { getSimulationHistory, deleteAllSimulationHistory } from '../api/simulation'
 
 const router = useRouter()
 const route = useRoute()
@@ -257,6 +262,7 @@ const route = useRoute()
 // 状态
 const projects = ref([])
 const loading = ref(true)
+const deletingHistory = ref(false)
 const isExpanded = ref(false)
 const hoveringCard = ref(null)
 const historyContainer = ref(null)
@@ -546,6 +552,38 @@ const loadHistory = async () => {
   }
 }
 
+const deleteHistory = async () => {
+  if (!projects.value.length || deletingHistory.value) {
+    return
+  }
+
+  const confirmed = window.confirm(
+    'Delete all run history? This will permanently remove stored runs, reports, files, and replay checkpoints.'
+  )
+
+  if (!confirmed) {
+    return
+  }
+
+  try {
+    deletingHistory.value = true
+    selectedProject.value = null
+
+    const response = await deleteAllSimulationHistory()
+    await loadHistory()
+
+    const errors = Array.isArray(response?.data?.errors) ? response.data.errors : []
+    if (errors.length > 0) {
+      alert(`Run history cleared with ${errors.length} warning(s):\n\n${errors.slice(0, 3).join('\n')}`)
+    }
+  } catch (error) {
+    console.error('删除历史项目失败:', error)
+    alert('Failed to delete run history: ' + (error?.message || 'Unknown error'))
+  } finally {
+    deletingHistory.value = false
+  }
+}
+
 // 初始化 IntersectionObserver
 const initObserver = () => {
   if (observer) {
@@ -785,6 +823,12 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+.section-action-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .section-updated {
   font-size: 0.68rem;
   color: #9CA3AF;
@@ -815,6 +859,31 @@ onUnmounted(() => {
 .refresh-button:disabled {
   opacity: 0.6;
   cursor: wait;
+}
+
+.delete-button {
+  border: 1px solid rgba(220, 38, 38, 0.22);
+  background: rgba(254, 242, 242, 0.95);
+  color: #B91C1C;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.delete-button:hover:not(:disabled) {
+  border-color: #B91C1C;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(185, 28, 28, 0.12);
+}
+
+.delete-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .history-stats {

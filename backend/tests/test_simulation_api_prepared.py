@@ -36,10 +36,12 @@ def load_simulation_api_module(sim_root: Path):
 
     factory_module = types.ModuleType("app.services.graph_backend_factory")
     factory_module.get_entity_reader_service = lambda graph_backend=None: object()
+    factory_module.get_graph_builder_service = lambda graph_backend=None, api_key=None: types.SimpleNamespace(delete_graph=lambda graph_id: None)
     factory_module.validate_graph_backend_requirements = lambda graph_backend=None: []
     sys.modules["app.services.graph_backend_factory"] = factory_module
 
     sys.modules["app.services.oasis_profile_generator"] = types.SimpleNamespace(OasisProfileGenerator=object)
+    sys.modules["app.services.report_agent"] = types.SimpleNamespace(ReportManager=object)
     sys.modules["app.services.simulation_manager"] = types.SimpleNamespace(SimulationManager=object, SimulationStatus=types.SimpleNamespace())
     sys.modules["app.services.simulation_runner"] = types.SimpleNamespace(SimulationRunner=object, RunnerStatus=types.SimpleNamespace())
     sys.modules["app.models.project"] = types.SimpleNamespace(ProjectManager=object)
@@ -101,3 +103,59 @@ def test_get_run_status_uses_public_runner_state_payload(tmp_path):
 
     assert payload["success"] is True
     assert payload["data"] == public_payload
+
+
+def test_delete_simulation_history_removes_related_artifacts(tmp_path):
+    module = load_simulation_api_module(tmp_path)
+
+    sim_a = types.SimpleNamespace(simulation_id="sim_a", project_id="proj_a", graph_id="graph_a", graph_backend="cognee")
+    sim_b = types.SimpleNamespace(simulation_id="sim_b", project_id="proj_b", graph_id="graph_b", graph_backend="zep")
+
+    deleted = {
+        "simulations": [],
+        "reports": [],
+        "projects": [],
+        "graphs": [],
+        "closed": [],
+        "cleaned": [],
+    }
+
+    module.SimulationManager = lambda: types.SimpleNamespace(
+        list_simulations=lambda: [sim_a, sim_b],
+        delete_simulation=lambda simulation_id: deleted["simulations"].append(simulation_id) or True,
+    )
+    module.ProjectManager = types.SimpleNamespace(
+        get_project=lambda project_id: types.SimpleNamespace(project_id=project_id, graph_id=f"graph_{project_id[-1]}", graph_backend="cognee"),
+        delete_project=lambda project_id: deleted["projects"].append(project_id) or True,
+    )
+    module.ReportManager = types.SimpleNamespace(
+        list_reports=lambda simulation_id=None, limit=1000: [types.SimpleNamespace(report_id=f"report_{simulation_id[-1]}")],
+        delete_report=lambda report_id: deleted["reports"].append(report_id) or True,
+    )
+    module.get_graph_builder_service = lambda graph_backend=None, api_key=None: types.SimpleNamespace(
+        delete_graph=lambda graph_id: deleted["graphs"].append((graph_backend, graph_id))
+    )
+    module.SimulationRunner = types.SimpleNamespace(
+        check_env_alive=lambda simulation_id: simulation_id == "sim_a",
+        close_simulation_env=lambda simulation_id, timeout=5: deleted["closed"].append((simulation_id, timeout)) or {"success": True},
+        get_run_state=lambda simulation_id: types.SimpleNamespace(runner_status="completed"),
+        stop_simulation=lambda simulation_id: (_ for _ in ()).throw(AssertionError("stop_simulation should not be called")),
+        cleanup_simulation_logs=lambda simulation_id: deleted["cleaned"].append(simulation_id) or {"success": True},
+    )
+
+    payload = module.delete_simulation_history()
+
+    assert payload["success"] is True
+    assert payload["data"]["deleted_counts"] == {
+        "simulations": 2,
+        "reports": 2,
+        "projects": 2,
+        "graphs": 2,
+    }
+    assert deleted["simulations"] == ["sim_a", "sim_b"]
+    assert deleted["reports"] == ["report_a", "report_b"]
+    assert deleted["projects"] == ["proj_a", "proj_b"]
+    assert deleted["graphs"] == [("cognee", "graph_a"), ("zep", "graph_b")]
+    assert deleted["closed"] == [("sim_a", 5)]
+    assert deleted["cleaned"] == ["sim_a", "sim_b"]
+    assert payload["data"]["errors"] == []
