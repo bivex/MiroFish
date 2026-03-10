@@ -13,6 +13,7 @@ import os
 import json
 import time
 import re
+from collections import Counter
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1050,6 +1051,41 @@ class ReportAgent:
         )
         return any(token in lowered for token in runtime_tokens)
 
+    def _is_low_value_report_grounded_line(self, text: str) -> bool:
+        normalized = self._normalize_tool_fact(text)
+        if not normalized:
+            return True
+
+        lowered = normalized.lower()
+        if self._is_low_value_chat_fact(normalized):
+            return True
+
+        uuid_pattern = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        if re.fullmatch(uuid_pattern, normalized, re.IGNORECASE):
+            return True
+
+        structural_fragments = (
+            "documentchunk",
+            "textdocument",
+            "textsummary",
+            "--[contains]-->",
+            " relation: contains ",
+            "source_id:",
+            "target_id:",
+            "canonical_id:",
+        )
+        if any(fragment in lowered for fragment in structural_fragments):
+            return True
+
+        if "trace_created_at" in lowered:
+            return True
+
+        metadata_action_pattern = (
+            r"\b(create_post|create_comment|quote_post|like_post|do_nothing|repost|retweeted)"
+            r"\s*:\s*\{.*\}$"
+        )
+        return re.search(metadata_action_pattern, normalized, re.IGNORECASE) is not None
+
     def _extract_grounded_tool_lines(self, tool_name: str, result: Any) -> List[str]:
         if tool_name == "insight_forge":
             candidates = list(getattr(result, "semantic_facts", []) or []) + list(
@@ -1066,11 +1102,28 @@ class ReportAgent:
         seen = set()
         for item in candidates:
             text = self._normalize_tool_fact(item)
-            if not text or text in seen or not self._is_runtime_fact_like(text):
+            if (
+                not text
+                or text in seen
+                or not self._is_runtime_fact_like(text)
+                or self._is_low_value_report_grounded_line(text)
+            ):
                 continue
             grounded.append(text)
             seen.add(text)
         return grounded
+
+    def _collect_grounded_section_lines(self, tool_evidence_records: List[Dict[str, Any]]) -> List[str]:
+        grounded_lines: List[str] = []
+        seen = set()
+        for record in tool_evidence_records:
+            for raw_line in (record.get("grounded_lines") or []):
+                text = self._normalize_tool_fact(raw_line)
+                if not text or text in seen or self._is_low_value_report_grounded_line(text):
+                    continue
+                grounded_lines.append(text)
+                seen.add(text)
+        return grounded_lines
 
     def _iter_chat_tool_candidates(self, tool_name: str, result: Any) -> List[Any]:
         if tool_name == "insight_forge":
@@ -1199,12 +1252,379 @@ class ReportAgent:
                 if subject:
                     current_subject = subject
                 normalized = self._normalize_chat_fact_line(raw_line, current_subject=current_subject)
-                if not normalized or normalized in seen:
+                if not normalized or self._is_low_value_chat_fact(normalized) or normalized in seen:
                     continue
                 facts.append(normalized)
                 seen.add(normalized)
 
         return facts
+
+    def _detect_chat_language(self, message: str, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
+        text_parts = [self._normalize_tool_fact(message)]
+        for item in reversed(chat_history or []):
+            if item.get("role") != "user":
+                continue
+            text_parts.append(self._normalize_tool_fact(item.get("content", "")))
+            if len(text_parts) >= 3:
+                break
+
+        joined = " ".join(part for part in text_parts if part)
+        lowered = joined.lower()
+        if re.search(r"[А-Яа-яЁё]", joined) or "по-рус" in lowered or "на русском" in lowered:
+            return "ru"
+        return "en"
+
+    def _classify_chat_intent(self, message: str) -> str:
+        lowered = self._normalize_tool_fact(message).lower()
+        if (
+            (
+                "актор" in lowered
+                or "актер" in lowered
+                or "актёр" in lowered
+                or "actors" in lowered
+                or "actor" in lowered
+                or "действующие лица" in lowered
+            )
+            and any(token in lowered for token in ("кто", "глав", "main", "key", "principal", "important"))
+        ):
+            return "actor_list"
+        if (
+            ("конфликт" in lowered or "conflict" in lowered or "кризис" in lowered or "crisis" in lowered)
+            and any(token in lowered for token in ("глав", "main", "current", "сейчас", "now"))
+        ):
+            return "main_conflict"
+        if "backend" in lowered or "бекенд" in lowered or "бэкенд" in lowered:
+            return "backend_meta"
+        return "fact_lookup"
+
+    def _normalize_actor_display_name(self, actor: str) -> str:
+        text = self._normalize_tool_fact(actor)
+        text = re.sub(r"(?:[_-]\d{2,})+$", "", text)
+        text = text.replace("_", " ")
+        text = re.sub(r"\s+", " ", text).strip(" -")
+        if not text:
+            return ""
+
+        particles = {"the", "of", "and", "or", "de", "da", "von"}
+        parts = []
+        for idx, part in enumerate(text.split()):
+            if part.isupper():
+                parts.append(part)
+            elif idx > 0 and part.lower() in particles:
+                parts.append(part.lower())
+            else:
+                parts.append(part.capitalize())
+        return " ".join(parts)
+
+    def _is_generic_placeholder_value(self, value: str) -> bool:
+        normalized = re.sub(r"\s+", " ", str(value or "").strip().lower())
+        normalized = normalized.strip("-—: ")
+        generic_values = {
+            "artifact",
+            "artifacts",
+            "faction",
+            "factions",
+            "actor",
+            "actors",
+            "organization",
+            "organizations",
+            "character",
+            "characters",
+            "location",
+            "locations",
+            "event",
+            "events",
+            "world rule",
+            "worldrule",
+            "entity",
+            "entities",
+        }
+        return normalized in generic_values
+
+    def _is_low_value_chat_fact(self, text: str) -> bool:
+        normalized = self._normalize_tool_fact(text)
+        lowered = normalized.lower()
+        if self._is_generic_placeholder_value(lowered):
+            return True
+
+        typed_match = re.match(r"([A-Za-z ]+):\s*(.+)$", normalized)
+        if typed_match:
+            label = typed_match.group(1).strip().lower()
+            value = typed_match.group(2).strip().lower()
+            if value == label or self._is_generic_placeholder_value(value):
+                return True
+
+        summary_match = re.match(r"(.+?)\s+—\s+summary:\s+(.+)$", normalized, re.IGNORECASE)
+        if summary_match:
+            subject = summary_match.group(1).strip().lower()
+            value = summary_match.group(2).strip().lower()
+            if value == subject and self._is_generic_placeholder_value(value):
+                return True
+
+        return False
+
+    def _extract_runtime_actor_activity(self, facts: List[str]) -> List[tuple[str, int]]:
+        counter: Counter[str] = Counter()
+        pattern = re.compile(
+            r"\[round\s+\d+\]\s+\[[^\]]+\]\s+(.+?)\s+"
+            r"(?:CREATEPOST|CREATE_POST|QUOTEPOST|QUOTE_POST|REPLYPOST|REPLY_POST|LIKEPOST|LIKE_POST|"
+            r"REPOST|SHAREPOST|COMMENT|POST|LIKE|SHARE)\b",
+            re.IGNORECASE,
+        )
+        for fact in facts:
+            match = pattern.search(self._normalize_tool_fact(fact))
+            if not match:
+                continue
+            actor = match.group(1).strip()
+            if not actor:
+                continue
+            actor = self._normalize_actor_display_name(actor)
+            if not actor:
+                continue
+            counter[actor] += 1
+        return counter.most_common(6)
+
+    def _is_generic_entity_type_query(self, message: str) -> bool:
+        tokens = re.findall(r"[A-Za-zА-Яа-я0-9_'-]+", self._normalize_tool_fact(message).lower())
+        filtered = {
+            token for token in tokens
+            if token not in {
+                "какой", "какая", "какое", "какие", "что", "это", "такое", "кто", "tell", "me", "about",
+                "which", "what", "is", "the", "a", "an", "какой-то", "какойто",
+            }
+        }
+        generic_types = {
+            "artifact", "artifacts", "faction", "factions", "actor", "actors", "character", "characters",
+            "location", "locations", "event", "events", "организация", "артефакт", "артефакты", "фракция",
+            "фракции", "актер", "актёр", "актеры", "актёры", "персонаж", "персонажи", "локация", "локации",
+            "событие", "события",
+        }
+        return bool(filtered) and filtered.issubset(generic_types)
+
+    def _build_generic_entity_clarification(self, language: str) -> str:
+        if language == "ru":
+            return "Вопрос слишком общий: по найденным фактам неясно, о какой именно сущности речь. Уточни конкретное имя или объект."
+        return "The question is too generic: I cannot tell which specific entity you mean from the retrieved facts. Please name the entity more precisely."
+
+    def _extract_summary_value(self, fact: str) -> Optional[str]:
+        def _is_bad_value(value: str) -> bool:
+            normalized = self._normalize_tool_fact(value).strip().lower().strip(".:;,- ")
+            return normalized in {"contains", "summary", "node", "edge", "value", "item", "entity"}
+
+        text = self._normalize_tool_fact(fact)
+        summary_match = re.match(r"(.+?)\s+—\s+summary:\s+(.+)$", text, re.IGNORECASE)
+        if summary_match:
+            subject = summary_match.group(1).strip()
+            summary = summary_match.group(2).strip()
+            if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", summary, re.IGNORECASE):
+                summary = ""
+            if _is_bad_value(summary):
+                summary = ""
+            if summary and summary.lower() != subject.lower():
+                return summary
+            if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", subject, re.IGNORECASE):
+                return None
+            if _is_bad_value(subject):
+                return None
+            return subject
+        typed_match = re.match(r"([A-Za-z ]+):\s*(.+)$", text)
+        if typed_match:
+            value = typed_match.group(2).strip()
+            if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value, re.IGNORECASE):
+                return None
+            if _is_bad_value(value):
+                return None
+            return value
+        if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", text, re.IGNORECASE):
+            return None
+        if _is_bad_value(text):
+            return None
+        return text or None
+
+    def _build_main_conflict_chat_response(self, facts: List[str], language: str) -> Optional[str]:
+        if not facts:
+            return None
+        semantic_facts = [fact for fact in facts if not self._is_runtime_fact_like(fact)]
+        if not semantic_facts:
+            return None
+        priority_tokens = ("rumor", "rumour", "forged", "decree", "succession", "conflict", "crisis", "court", "guard")
+        ranked = sorted(
+            semantic_facts,
+            key=lambda fact: (
+                1 if "— summary:" in fact.lower() else 0,
+                sum(1 for token in priority_tokens if token in fact.lower()),
+            ),
+            reverse=True,
+        )
+        best = None
+        for candidate in ranked:
+            value = self._extract_summary_value(candidate)
+            if value:
+                best = value
+                break
+        if not best:
+            return None
+        if language == "ru":
+            return f"По найденным фактам главный конфликт сейчас — {best}."
+        return f"Based on retrieved facts, the main conflict right now is: {best}."
+
+    def _get_previous_assistant_message(self, chat_history: Optional[List[Dict[str, str]]]) -> Optional[str]:
+        for item in reversed(chat_history or []):
+            if item.get("role") == "assistant":
+                content = str(item.get("content", "") or "").strip()
+                if content:
+                    return content
+        return None
+
+    def _translate_chat_response_to_russian(self, response: str) -> str:
+        text = response.strip()
+        if not text:
+            return text
+        text = text.replace("Based only on retrieved facts:", "Только по найденным фактам:")
+        text = re.sub(r"- … (\d+) more retrieved facts omitted", r"- … скрыто ещё \1 найденных фактов", text)
+        if text.startswith("I could not find enough verified facts"):
+            return "Не нашёл достаточно верифицированных фактов в текущей памяти, чтобы надёжно ответить."
+        if text.startswith("Based on retrieved facts, the most visible actors are:"):
+            return text.replace("Based on retrieved facts, the most visible actors are:", "По найденным фактам наиболее заметные акторы:")
+        if text.startswith("Based on retrieved facts, the main conflict right now is:"):
+            return text.replace("Based on retrieved facts, the main conflict right now is:", "По найденным фактам главный конфликт сейчас —")
+        return text
+
+    def _compress_chat_response(self, response: str, language: str) -> str:
+        text = self._normalize_tool_fact(response)
+        if not text:
+            return text
+        if "\n" not in response:
+            return text
+
+        bullet_lines = [
+            self._normalize_tool_fact(line.lstrip("-•* "))
+            for line in response.splitlines()
+            if line.strip().startswith(("-", "•", "*"))
+        ]
+        bullet_lines = [line for line in bullet_lines if line]
+        if bullet_lines:
+            joined = "; ".join(bullet_lines[:2])
+            prefix = "Только по найденным фактам: " if language == "ru" else "Based only on retrieved facts: "
+            return prefix + joined
+
+        first_line = self._normalize_tool_fact(response.splitlines()[0])
+        return first_line
+
+    def _try_handle_followup_chat_instruction(
+        self,
+        message: str,
+        chat_history: Optional[List[Dict[str, str]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        lowered = self._normalize_tool_fact(message).lower()
+        wants_russian = any(token in lowered for token in ("по-рус", "по рус", "на русском", "на руском", "руском", "русском"))
+        wants_short = any(token in lowered for token in ("короче", "коротко", "одной строкой", "one line", "briefly", "shorter"))
+        residual_tokens = [
+            token for token in re.findall(r"[A-Za-zА-Яа-я0-9_'-]+", lowered)
+            if token not in {
+                "ответь", "скажи", "пожалуйста", "по", "на", "русском", "руском", "русски", "по-русски",
+                "короче", "коротко", "одной", "строкой", "one", "line", "briefly", "shorter", "не", "понял",
+            }
+        ]
+        followup_markers = lowered in {"не понял", "что?"} or ((wants_russian or wants_short) and len(residual_tokens) <= 1)
+        if not followup_markers:
+            return None
+
+        previous = self._get_previous_assistant_message(chat_history)
+        if not previous:
+            return None
+
+        response = previous
+        language = self._detect_chat_language(message, chat_history=chat_history)
+        if wants_russian:
+            response = self._translate_chat_response_to_russian(response)
+        if wants_short:
+            response = self._compress_chat_response(response, language)
+
+        return {
+            "response": response,
+            "tool_calls": [],
+            "sources": [],
+        }
+
+    def _try_handle_direct_chat_intent(
+        self,
+        message: str,
+        chat_history: Optional[List[Dict[str, str]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        followup = self._try_handle_followup_chat_instruction(message, chat_history=chat_history)
+        if followup:
+            return followup
+
+        language = self._detect_chat_language(message, chat_history=chat_history)
+        intent = self._classify_chat_intent(message)
+
+        if self._is_generic_entity_type_query(message):
+            return {
+                "response": self._build_generic_entity_clarification(language),
+                "tool_calls": [],
+                "sources": [],
+            }
+
+        if intent == "actor_list":
+            auto_call = {"name": "quick_search", "parameters": {"query": message, "limit": 8}}
+            payload = self._execute_tool_payload(auto_call["name"], auto_call["parameters"])
+            facts = payload.get("chat_facts") or []
+            response = self._build_actor_list_chat_response(facts, language) or self._build_no_fact_chat_response([message], language, intent)
+            return {
+                "response": response,
+                "tool_calls": [auto_call],
+                "sources": [message],
+            }
+
+        if intent == "main_conflict":
+            query = self.simulation_requirement or message
+            auto_call = {"name": "insight_forge", "parameters": {"query": query}}
+            payload = self._execute_tool_payload(auto_call["name"], auto_call["parameters"])
+            facts = payload.get("chat_facts") or []
+            response = self._build_main_conflict_chat_response(facts, language)
+            if not response:
+                response = self._build_no_fact_chat_response([query], language, intent)
+            return {
+                "response": response,
+                "tool_calls": [auto_call],
+                "sources": [query],
+            }
+
+        return None
+
+    def _build_no_fact_chat_response(self, checked_queries: List[str], language: str, intent: str) -> str:
+        if language == "ru":
+            if intent == "backend_meta":
+                lines = [
+                    "По найденным фактам я не могу определить, какой backend используется.",
+                    "Это техническая мета-информация, а не содержимое runtime memory.",
+                ]
+            else:
+                lines = [
+                    "Не нашёл достаточно верифицированных фактов в текущей памяти, чтобы надёжно ответить.",
+                    "Попробуй сузить вопрос или уточнить конкретную сущность.",
+                ]
+            if checked_queries:
+                lines.append(f"Проверенные запросы: {', '.join(checked_queries[:3])}")
+            return "\n".join(lines)
+
+        lines = [
+            "I could not find enough verified facts in the current report memory to answer that reliably.",
+            "Please try a narrower question or add more simulation evidence.",
+        ]
+        if checked_queries:
+            lines.append(f"Checked queries: {', '.join(checked_queries[:3])}")
+        return "\n".join(lines)
+
+    def _build_actor_list_chat_response(self, facts: List[str], language: str) -> Optional[str]:
+        actors = self._extract_runtime_actor_activity(facts)
+        if not actors:
+            return None
+        actor_names = [name for name, _ in actors]
+        if language == "ru":
+            return f"По найденным фактам наиболее заметные акторы: {', '.join(actor_names)}."
+        return f"Based on retrieved facts, the most visible actors are: {', '.join(actor_names)}."
 
     def _clean_chat_response(self, response: Optional[str]) -> str:
         text = response or ""
@@ -1247,21 +1667,32 @@ class ReportAgent:
         tokens = re.findall(r"[A-Za-zА-Яа-я0-9_'-]+", query.lower())
         return [token for token in tokens if len(token) >= 3 and token not in stop_words]
 
-    def _build_fact_bound_chat_response(self, tool_fact_records: List[Dict[str, Any]]) -> str:
+    def _build_fact_bound_chat_response(
+        self,
+        message: str,
+        tool_fact_records: List[Dict[str, Any]],
+        chat_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
+        language = self._detect_chat_language(message, chat_history=chat_history)
+        intent = self._classify_chat_intent(message)
         matched_facts: List[str] = []
         unmatched_facts: List[str] = []
         seen_matched = set()
         seen_unmatched = set()
         checked_queries: List[str] = []
+        had_query_terms = False
 
         for record in tool_fact_records:
             query = self._normalize_tool_fact(record.get("query", ""))
             query_terms = self._tokenize_chat_query(query)
+            had_query_terms = had_query_terms or bool(query_terms)
             if query and query not in checked_queries:
                 checked_queries.append(query)
             for fact in record.get("facts") or []:
                 normalized = self._normalize_tool_fact(fact)
                 if not normalized:
+                    continue
+                if self._is_low_value_chat_fact(normalized):
                     continue
                 if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", normalized, re.IGNORECASE):
                     continue
@@ -1280,25 +1711,32 @@ class ReportAgent:
                 unmatched_facts.append(normalized)
                 seen_unmatched.add(normalized)
 
-        facts = matched_facts or unmatched_facts
+        if intent == "actor_list":
+            actor_response = self._build_actor_list_chat_response(matched_facts or unmatched_facts, language)
+            if actor_response:
+                return actor_response
+
+        if matched_facts:
+            facts = matched_facts
+        elif had_query_terms:
+            return self._build_no_fact_chat_response(checked_queries, language, intent)
+        else:
+            facts = unmatched_facts
 
         if not facts:
-            lines = [
-                "I could not find enough verified facts in the current report memory to answer that reliably.",
-                "Please try a narrower question or add more simulation evidence.",
-            ]
-            if checked_queries:
-                lines.append(f"Checked queries: {', '.join(checked_queries[:3])}")
-            return "\n".join(lines)
+            return self._build_no_fact_chat_response(checked_queries, language, intent)
 
         if len(facts) == 1:
             return facts[0]
 
-        lines = ["Based only on retrieved facts:"]
+        lines = ["Только по найденным фактам:" if language == "ru" else "Based only on retrieved facts:"]
         for fact in facts[:6]:
             lines.append(f"- {fact}")
         if len(facts) > 6:
-            lines.append(f"- … {len(facts) - 6} more retrieved facts omitted")
+            if language == "ru":
+                lines.append(f"- … скрыто ещё {len(facts) - 6} найденных фактов")
+            else:
+                lines.append(f"- … {len(facts) - 6} more retrieved facts omitted")
         return "\n".join(lines)
 
     def _render_tool_result_for_llm(
@@ -1340,6 +1778,7 @@ class ReportAgent:
             "meaningful": False,
         }
         grounded_lines = self._extract_grounded_tool_lines(tool_name, result)
+        summary["grounded_lines"] = grounded_lines[:8]
         summary["grounded_line_count"] = len(grounded_lines)
 
         if tool_name == "insight_forge":
@@ -1533,7 +1972,9 @@ class ReportAgent:
         """当图检索没有产出有效证据时，退化为只基于 runtime actions 的 grounded 文本。"""
         runtime_evidence = self._get_runtime_evidence()
         action_facts = [
-            str(item).strip() for item in (runtime_evidence.get("action_facts") or []) if str(item).strip()
+            str(item).strip()
+            for item in (runtime_evidence.get("action_facts") or [])
+            if str(item).strip() and not self._is_low_value_report_grounded_line(str(item))
         ]
         current_round = runtime_evidence.get("current_round", 0)
         total_actions = runtime_evidence.get("total_actions", 0)
@@ -1566,6 +2007,27 @@ class ReportAgent:
             lines.append(f"Sparse tool calls observed: {sparse_tools}.")
         return "\n".join(lines).strip()
 
+    def _build_strict_grounded_section_fallback(
+        self,
+        tool_evidence_records: List[Dict[str, Any]],
+    ) -> str:
+        grounded_lines = self._collect_grounded_section_lines(tool_evidence_records)
+        if not grounded_lines:
+            return self._build_grounded_runtime_fallback(tool_evidence_records)
+
+        lines = [
+            "This section was auto-finalized in strict grounding mode because the model did not return an explicit Final Answer. Only verified retrieved facts are listed below.",
+            "",
+            "Verified retrieved facts:",
+        ]
+        for line in grounded_lines[:6]:
+            lines.append(f"- {line}")
+        lines.extend([
+            "",
+            "A fuller analytical narrative should be generated only after the model returns an explicit Final Answer grounded in these facts.",
+        ])
+        return "\n".join(lines).strip()
+
     def _finalize_section_output(
         self,
         section: "ReportSection",
@@ -1573,6 +2035,7 @@ class ReportAgent:
         content: str,
         tool_calls_count: int,
         tool_evidence_records: List[Dict[str, Any]],
+        had_final_answer: bool,
     ) -> str:
         """在写入章节前做最后一道 grounding 检查。"""
         final_answer = (content or "").strip()
@@ -1592,6 +2055,25 @@ class ReportAgent:
                     section_index=section_index,
                     details={
                         "message": "All tool calls were empty or low-signal; replaced section with runtime-grounded fallback.",
+                        "tool_calls_count": tool_calls_count,
+                        "tool_evidence": tool_evidence_records,
+                    },
+                )
+
+        elif self.graph_backend == "cognee" and not had_final_answer:
+            logger.warning(
+                f"章节 {section.title} 缺少显式 Final Answer，使用 strict grounded fallback "
+                f"（tool_calls={tool_calls_count}）"
+            )
+            final_answer = self._build_strict_grounded_section_fallback(tool_evidence_records)
+            if self.report_logger:
+                self.report_logger.log(
+                    action="section_strict_grounded_fallback",
+                    stage="generating",
+                    section_title=section.title,
+                    section_index=section_index,
+                    details={
+                        "message": "Model response lacked an explicit Final Answer; replaced section with strict grounded fallback.",
                         "tool_calls_count": tool_calls_count,
                         "tool_evidence": tool_evidence_records,
                     },
@@ -2030,6 +2512,7 @@ class ReportAgent:
                     content=final_answer,
                     tool_calls_count=tool_calls_count,
                     tool_evidence_records=tool_evidence_records,
+                    had_final_answer=True,
                 )
 
             # ── 情况2：LLM 尝试调用工具 ──
@@ -2132,6 +2615,7 @@ class ReportAgent:
                 content=final_answer,
                 tool_calls_count=tool_calls_count,
                 tool_evidence_records=tool_evidence_records,
+                had_final_answer=False,
             )
         
         # 达到最大迭代次数，强制生成内容
@@ -2159,6 +2643,7 @@ class ReportAgent:
             content=final_answer,
             tool_calls_count=tool_calls_count,
             tool_evidence_records=tool_evidence_records,
+            had_final_answer="Final Answer:" in (response or ""),
         )
     
     def generate_report(
@@ -2421,6 +2906,10 @@ class ReportAgent:
         logger.info(f"Report Agent对话: {message[:50]}...")
         
         chat_history = chat_history or []
+
+        direct_response = self._try_handle_direct_chat_intent(message, chat_history=chat_history)
+        if direct_response is not None:
+            return direct_response
         
         # 获取已生成的报告内容
         report_content = ""
@@ -2484,7 +2973,7 @@ class ReportAgent:
                     })
                 if self.graph_backend == "cognee" and tool_fact_records:
                     return {
-                        "response": self._build_fact_bound_chat_response(tool_fact_records),
+                        "response": self._build_fact_bound_chat_response(message, tool_fact_records, chat_history=chat_history),
                         "tool_calls": tool_calls_made,
                         "sources": [tc.get("parameters", {}).get("query", "") for tc in tool_calls_made],
                     }
@@ -2529,7 +3018,7 @@ class ReportAgent:
         
         if self.graph_backend == "cognee" and tool_fact_records:
             return {
-                "response": self._build_fact_bound_chat_response(tool_fact_records),
+                "response": self._build_fact_bound_chat_response(message, tool_fact_records, chat_history=chat_history),
                 "tool_calls": tool_calls_made,
                 "sources": [tc.get("parameters", {}).get("query", "") for tc in tool_calls_made]
             }

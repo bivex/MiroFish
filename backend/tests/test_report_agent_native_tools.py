@@ -233,6 +233,7 @@ def test_generate_section_react_uses_runtime_fallback_when_all_tool_results_are_
                 "current_round": 10,
                 "total_actions": 68,
                 "action_facts": [
+                    "[round 10] [twitter] captain_serik_488 quote_post: {\"trace_created_at\": 4}",
                     "[round 0] [twitter] Town Crier Nessa posted the initial forged-decree rumor.",
                     "[round 10] [twitter] Royal Court posted that the decree remains valid and the succession is unchanged.",
                     "[round 10] [twitter] Archivist Maelin posted that no evidence of forgery was found in the seals and records.",
@@ -264,6 +265,7 @@ def test_generate_section_react_uses_runtime_fallback_when_all_tool_results_are_
     assert "graph retrieval returned sparse results" in content
     assert "Town Crier Nessa posted the initial forged-decree rumor" in content
     assert "Royal Court posted that the decree remains valid" in content
+    assert "trace_created_at" not in content
     assert "This confident narrative should not be accepted as-is." not in content
 
 
@@ -276,7 +278,7 @@ def test_generate_section_react_keeps_llm_content_when_tool_evidence_exists():
                 '<tool_call>{"name": "insight_forge", "parameters": {"query": "institutional response"}}</tool_call>',
                 '<tool_call>{"name": "panorama_search", "parameters": {"query": "guard statements"}}</tool_call>',
                 '<tool_call>{"name": "quick_search", "parameters": {"query": "royal court decree", "limit": 5}}</tool_call>',
-                'Verified synthesis based on retrieved evidence.',
+                'Final Answer: Verified synthesis based on retrieved evidence.',
             ])
 
         def chat(self, **kwargs):
@@ -337,6 +339,80 @@ def test_generate_section_react_keeps_llm_content_when_tool_evidence_exists():
     )
 
     assert content == "Verified synthesis based on retrieved evidence."
+
+
+def test_generate_section_react_uses_strict_grounded_fallback_when_final_answer_prefix_is_missing():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def __init__(self):
+            self.responses = iter([
+                '<tool_call>{"name": "insight_forge", "parameters": {"query": "institutional response"}}</tool_call>',
+                '<tool_call>{"name": "panorama_search", "parameters": {"query": "guard statements"}}</tool_call>',
+                '<tool_call>{"name": "quick_search", "parameters": {"query": "royal court decree", "limit": 5}}</tool_call>',
+                'Verified synthesis based on retrieved evidence.',
+            ])
+
+        def chat(self, **kwargs):
+            return next(self.responses)
+
+    class ToolsStub:
+        def insight_forge(self, **kwargs):
+            return types.SimpleNamespace(
+                semantic_facts=[],
+                entity_insights=[],
+                relationship_chains=[],
+                diagnostics={"evidence_sources": ["no_evidence"]},
+                to_text=lambda: "Current Key Memory (0)",
+            )
+
+        def panorama_search(self, **kwargs):
+            return types.SimpleNamespace(
+                active_facts=[],
+                all_nodes=[],
+                all_edges=[],
+                diagnostics={"evidence_sources": ["no_evidence"]},
+                to_text=lambda: "Active Memory (0)",
+            )
+
+        def quick_search(self, **kwargs):
+            return types.SimpleNamespace(
+                facts=["[round 10] [twitter] Royal Court posted that the decree remains valid."],
+                nodes=[],
+                edges=[],
+                total_count=1,
+                diagnostics={"evidence_sources": ["runtime_actions"]},
+                to_text=lambda: "Search Results\n1 facts\n[round 10] [twitter] Royal Court posted that the decree remains valid.",
+            )
+
+        def get_runtime_evidence(self, simulation_id, limit=10):
+            return {"simulation_id": simulation_id, "has_runtime_evidence": True}
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_strict_prefix",
+        simulation_requirement="Analyze official messaging.",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    outline = module.ReportOutline(
+        title="Institutional Report",
+        summary="Use retrieved evidence",
+        sections=[module.ReportSection(title="Institutional Reactions")],
+    )
+
+    content = agent._generate_section_react(
+        section=outline.sections[0],
+        outline=outline,
+        previous_sections=[],
+        section_index=0,
+    )
+
+    assert "auto-finalized in strict grounding mode" in content
+    assert "Royal Court posted that the decree remains valid." in content
+    assert "Verified synthesis based on retrieved evidence." not in content
 
 
 def test_generate_section_react_uses_runtime_fallback_when_tool_results_are_graph_noise_only():
@@ -429,14 +505,16 @@ def test_execute_tool_payload_prefers_runtime_facts_for_cognee_tool_text():
         def quick_search(self, **kwargs):
             return types.SimpleNamespace(
                 facts=[
+                    "[round 10] DocumentChunk rumor-brief --[contains]--> TextSummary court-response",
+                    "[round 10] [twitter] captain_serik_488 quote_post: {\"trace_created_at\": 4}",
                     "[round 10] [twitter] Royal Court posted that the decree remains valid.",
                     "WorldRule: Merchants panic quickly when succession looks unstable",
                 ],
                 nodes=[],
                 edges=[],
-                total_count=2,
+                total_count=4,
                 diagnostics={"evidence_sources": ["runtime_actions", "local_graph_nodes"]},
-                to_text=lambda: "Search Results\n[round 10] [twitter] Royal Court posted that the decree remains valid.\nWorldRule: Merchants panic quickly when succession looks unstable",
+                to_text=lambda: "Search Results\n[round 10] DocumentChunk rumor-brief --[contains]--> TextSummary court-response\n[round 10] [twitter] captain_serik_488 quote_post: {\"trace_created_at\": 4}\n[round 10] [twitter] Royal Court posted that the decree remains valid.\nWorldRule: Merchants panic quickly when succession looks unstable",
             )
 
     agent = module.ReportAgent(
@@ -452,8 +530,11 @@ def test_execute_tool_payload_prefers_runtime_facts_for_cognee_tool_text():
 
     assert "Verified runtime evidence from quick_search:" in payload["text"]
     assert "[round 10] [twitter] Royal Court posted that the decree remains valid." in payload["text"]
+    assert "DocumentChunk" not in payload["text"]
+    assert "trace_created_at" not in payload["text"]
     assert "WorldRule:" not in payload["text"]
     assert payload["evidence"]["meaningful"] is True
+    assert payload["evidence"]["grounded_line_count"] == 1
 
 
 def test_chat_returns_only_retrieved_facts_when_tool_results_exist():
@@ -654,3 +735,255 @@ def test_chat_auto_extracts_entity_query_from_russian_prompt():
 
     assert tools.last_query == "Harbor Guild"
     assert "Organization: Harbor Guild" in result["response"]
+
+
+def test_chat_returns_russian_actor_list_for_actor_overview_question():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def chat(self, **kwargs):
+            return "Не знаю."
+
+    class ToolsStub:
+        def quick_search(self, **kwargs):
+            return types.SimpleNamespace(
+                facts=[
+                    "[round 10] [twitter] town crier nessa CREATEPOST",
+                    "[round 10] [twitter] captain serik QUOTEPOST",
+                    "[round 10] [twitter] royal court QUOTEPOST",
+                ],
+                nodes=[],
+                edges=[],
+                total_count=3,
+                diagnostics={"evidence_sources": ["runtime_actions"]},
+                to_text=lambda: "Search Results",
+            )
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_ru_actors",
+        simulation_requirement="Answer actor questions from retrieved memory.",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    result = agent.chat("Кто главные актеры?")
+
+    assert result["response"].startswith("По найденным фактам наиболее заметные акторы:")
+    assert "Town Crier Nessa" in result["response"]
+    assert "Captain Serik" in result["response"]
+    assert "Royal Court" in result["response"]
+
+
+def test_chat_returns_russian_no_fact_message_for_unmatched_backend_question():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def chat(self, **kwargs):
+            return "Не знаю."
+
+    class ToolsStub:
+        def quick_search(self, **kwargs):
+            return types.SimpleNamespace(
+                facts=["[round 10] [twitter] town crier nessa CREATEPOST"],
+                nodes=[],
+                edges=[],
+                total_count=1,
+                diagnostics={"evidence_sources": ["runtime_actions"]},
+                to_text=lambda: "Search Results",
+            )
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_ru_backend",
+        simulation_requirement="Answer actor questions from retrieved memory.",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    result = agent.chat("Какой бекенд ты юзаешь?")
+
+    assert "не могу определить" in result["response"].lower()
+    assert "town crier nessa" not in result["response"].lower()
+
+
+def test_chat_filters_generic_placeholder_summary_nodes():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def chat(self, **kwargs):
+            return "I don't know."
+
+    class ToolsStub:
+        def quick_search(self, **kwargs):
+            return types.SimpleNamespace(
+                facts=[],
+                nodes=[{"name": "artifact", "type": "artifact", "summary": "artifact"}],
+                edges=[],
+                total_count=1,
+                diagnostics={"evidence_sources": ["local_graph_nodes"]},
+                to_text=lambda: "Search Results",
+            )
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_placeholder",
+        simulation_requirement="Answer actor questions from retrieved memory.",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    result = agent.chat("artifact какой")
+
+    assert "Вопрос слишком общий" in result["response"]
+    assert result["tool_calls"] == []
+    assert "artifact — summary: artifact" not in result["response"]
+
+
+def test_chat_restates_previous_answer_in_russian_without_new_tools():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def chat(self, **kwargs):
+            raise AssertionError("LLM should not be used for language-only follow-up")
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_followup_ru",
+        simulation_requirement="Answer actor questions from retrieved memory.",
+        llm_client=LLMStub(),
+        zep_tools=types.SimpleNamespace(),
+        graph_backend="cognee",
+    )
+
+    history = [{"role": "assistant", "content": "Based on retrieved facts, the most visible actors are: Town Crier Nessa, Captain Serik."}]
+    result = agent.chat("ответь по-русски", chat_history=history)
+
+    assert result["response"].startswith("По найденным фактам наиболее заметные акторы:")
+    assert result["tool_calls"] == []
+
+
+def test_chat_summarizes_main_conflict_from_direct_search():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def chat(self, **kwargs):
+            raise AssertionError("LLM should not be used for direct main conflict intent")
+
+    class ToolsStub:
+        def insight_forge(self, **kwargs):
+            return types.SimpleNamespace(
+                semantic_facts=["Forged succession decree rumor — summary: Rumor about a forged succession decree destabilizing the royal court."],
+                relationship_chains=[],
+                entity_insights=[],
+                diagnostics={"evidence_sources": ["sidecar_search"]},
+                to_text=lambda: "Search Results",
+            )
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_conflict",
+        simulation_requirement="forged royal succession decree rumor",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    result = agent.chat("какой главный конфликт сейчас? ответь коротко")
+
+    assert result["response"].startswith("По найденным фактам главный конфликт сейчас —")
+    assert "forged succession decree" in result["response"].lower()
+    assert result["tool_calls"][0]["name"] == "insight_forge"
+
+
+def test_chat_main_conflict_question_with_short_instruction_is_not_treated_as_followup():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def chat(self, **kwargs):
+            raise AssertionError("LLM should not be used for direct main conflict intent")
+
+    class ToolsStub:
+        def insight_forge(self, **kwargs):
+            return types.SimpleNamespace(
+                semantic_facts=["Forged succession decree rumor — summary: Rumor about a forged succession decree destabilizing the royal court."],
+                relationship_chains=[],
+                entity_insights=[],
+                diagnostics={"evidence_sources": ["sidecar_search"]},
+                to_text=lambda: "Search Results",
+            )
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_conflict_history",
+        simulation_requirement="forged royal succession decree rumor",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    history = [{"role": "assistant", "content": "Вопрос слишком общий: уточни сущность."}]
+    result = agent.chat("какой главный конфликт сейчас? ответь коротко", chat_history=history)
+
+    assert result["response"].startswith("По найденным фактам главный конфликт сейчас —")
+    assert result["tool_calls"][0]["name"] == "insight_forge"
+
+
+def test_chat_main_conflict_refuses_when_only_runtime_lines_exist():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def chat(self, **kwargs):
+            raise AssertionError("LLM should not be used for direct main conflict intent")
+
+    class ToolsStub:
+        def insight_forge(self, **kwargs):
+            return types.SimpleNamespace(
+                semantic_facts=["[round 12] [twitter] captain_serik_488 quote_post: {\"trace_created_at\": 4}"],
+                relationship_chains=[],
+                entity_insights=[],
+                diagnostics={"evidence_sources": ["runtime_actions"]},
+                to_text=lambda: "Search Results",
+            )
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_conflict_runtime_only",
+        simulation_requirement="forged royal succession decree rumor",
+        llm_client=LLMStub(),
+        zep_tools=ToolsStub(),
+        graph_backend="cognee",
+    )
+
+    result = agent.chat("какой главный конфликт сейчас? ответь коротко")
+
+    assert "Не нашёл достаточно верифицированных фактов" in result["response"]
+
+
+def test_chat_shortens_previous_fact_dump_into_one_line():
+    module = load_report_agent_module()
+
+    class LLMStub:
+        def chat(self, **kwargs):
+            raise AssertionError("LLM should not be used for brevity-only follow-up")
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_chat_followup_short",
+        simulation_requirement="Answer actor questions from retrieved memory.",
+        llm_client=LLMStub(),
+        zep_tools=types.SimpleNamespace(),
+        graph_backend="cognee",
+    )
+
+    history = [{
+        "role": "assistant",
+        "content": "Только по найденным фактам:\n- Fact one\n- Fact two\n- Fact three",
+    }]
+    result = agent.chat("короче, одной строкой", chat_history=history)
+
+    assert result["response"] == "Только по найденным фактам: Fact one; Fact two"
+    assert result["tool_calls"] == []

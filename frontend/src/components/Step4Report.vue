@@ -539,6 +539,53 @@ const getToolIcon = (toolName) => {
 }
 
 // Parse functions
+const tryParseToolJson = (text) => {
+  if (!text || typeof text !== 'string') return null
+  try {
+    const parsed = JSON.parse(text)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const firstNonEmptyText = (...values) => {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
+
+const mapNodePreview = (node) => {
+  if (!node || typeof node !== 'object') return null
+  const type = firstNonEmptyText(node.type, node.entity_type, Array.isArray(node.labels) ? node.labels[0] : '')
+  const name = firstNonEmptyText(node.name, node.title, node.uuid)
+  if (!name) return null
+  return {
+    name,
+    type,
+    summary: firstNonEmptyText(node.summary),
+    relatedFactsCount: Number(node.related_facts_count ?? node.relatedFactsCount ?? 0) || 0
+  }
+}
+
+const mapEdgePreview = (edge) => {
+  if (!edge) return null
+  if (typeof edge === 'string') {
+    const match = edge.match(/^(.+?)\s*--\[(.+?)\]-->\s*(.+)$/)
+    if (match) {
+      return { source: match[1].trim(), relation: match[2].trim(), target: match[3].trim() }
+    }
+    return { source: 'Chain', relation: 'notes', target: edge.trim() }
+  }
+  if (typeof edge !== 'object') return null
+  return {
+    source: firstNonEmptyText(edge.source, edge.source_node_name, edge.source_node_uuid),
+    relation: firstNonEmptyText(edge.relation, edge.name),
+    target: firstNonEmptyText(edge.target, edge.target_node_name, edge.target_node_uuid, edge.fact)
+  }
+}
+
 const parseInsightForge = (text) => {
   const result = {
     query: '',
@@ -551,6 +598,20 @@ const parseInsightForge = (text) => {
   }
   
   try {
+    const parsed = tryParseToolJson(text)
+    if (parsed) {
+      result.query = firstNonEmptyText(parsed.query)
+      result.simulationRequirement = firstNonEmptyText(parsed.simulation_requirement)
+      result.subQueries = Array.isArray(parsed.sub_queries) ? parsed.sub_queries.filter(Boolean) : []
+      result.facts = Array.isArray(parsed.semantic_facts) ? parsed.semantic_facts.filter(Boolean) : []
+      result.entities = Array.isArray(parsed.entity_insights) ? parsed.entity_insights.map(mapNodePreview).filter(Boolean) : []
+      result.relations = Array.isArray(parsed.relationship_chains) ? parsed.relationship_chains.map(mapEdgePreview).filter(Boolean) : []
+      result.stats.facts = result.facts.length
+      result.stats.entities = result.entities.length
+      result.stats.relationships = result.relations.length
+      return result
+    }
+
     // 提取分析问题
     const queryMatch = text.match(/分析问题:\s*(.+?)(?:\n|$)/)
     if (queryMatch) result.query = queryMatch[1].trim()
@@ -632,6 +693,19 @@ const parsePanorama = (text) => {
   }
   
   try {
+    const parsed = tryParseToolJson(text)
+    if (parsed) {
+      result.query = firstNonEmptyText(parsed.query)
+      result.activeFacts = Array.isArray(parsed.active_facts) ? parsed.active_facts.filter(Boolean) : []
+      result.historicalFacts = Array.isArray(parsed.historical_facts) ? parsed.historical_facts.filter(Boolean) : []
+      result.entities = Array.isArray(parsed.all_nodes) ? parsed.all_nodes.map(mapNodePreview).filter(Boolean) : []
+      result.stats.nodes = Array.isArray(parsed.all_nodes) ? parsed.all_nodes.length : result.entities.length
+      result.stats.edges = Array.isArray(parsed.all_edges) ? parsed.all_edges.length : 0
+      result.stats.activeFacts = result.activeFacts.length
+      result.stats.historicalFacts = result.historicalFacts.length
+      return result
+    }
+
     // 提取查询
     const queryMatch = text.match(/查询:\s*(.+?)(?:\n|$)/)
     if (queryMatch) result.query = queryMatch[1].trim()
@@ -909,6 +983,16 @@ const parseQuickSearch = (text) => {
   }
   
   try {
+    const parsed = tryParseToolJson(text)
+    if (parsed) {
+      result.query = firstNonEmptyText(parsed.query)
+      result.facts = Array.isArray(parsed.facts) ? parsed.facts.filter(Boolean) : []
+      result.edges = Array.isArray(parsed.edges) ? parsed.edges.map(mapEdgePreview).filter(Boolean) : []
+      result.nodes = Array.isArray(parsed.nodes) ? parsed.nodes.map(mapNodePreview).filter(Boolean) : []
+      result.count = Number(parsed.total_count ?? result.facts.length) || 0
+      return result
+    }
+
     // 提取搜索查询
     const queryMatch = text.match(/搜索查询:\s*(.+?)(?:\n|$)/)
     if (queryMatch) result.query = queryMatch[1].trim()
