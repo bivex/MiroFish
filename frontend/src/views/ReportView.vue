@@ -36,7 +36,7 @@
     <!-- Main Content Area -->
     <main class="content-area">
       <!-- Left Panel: Graph -->
-      <div class="panel-wrapper left" :style="leftPanelStyle">
+      <div v-if="shouldRenderGraphPanel" class="panel-wrapper left" :style="leftPanelStyle">
         <GraphPanel 
           :graphData="graphData"
           :loading="graphLoading"
@@ -64,9 +64,9 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, watch, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import GraphPanel from '../components/GraphPanel.vue'
+const GraphPanel = defineAsyncComponent(() => import('../components/GraphPanel.vue'))
 import Step4Report from '../components/Step4Report.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation } from '../api/simulation'
@@ -89,6 +89,8 @@ const simulationId = ref(null)
 const projectData = ref(null)
 const graphData = ref(null)
 const graphLoading = ref(false)
+const graphContextLoading = ref(false)
+const graphContextLoaded = ref(false)
 const graphLoadError = ref('')
 const systemLogs = ref([])
 const currentStatus = ref('processing') // processing | completed | error
@@ -105,6 +107,8 @@ const rightPanelStyle = computed(() => {
   if (viewMode.value === 'graph') return { width: '0%', opacity: 0, transform: 'translateX(20px)' }
   return { width: '50%', opacity: 1, transform: 'translateX(0)' }
 })
+
+const shouldRenderGraphPanel = computed(() => viewMode.value !== 'workbench')
 
 // --- Status Computed ---
 const statusClass = computed(() => {
@@ -171,33 +175,53 @@ const loadReportData = async () => {
     if (reportRes.success && reportRes.data) {
       const reportData = reportRes.data
       simulationId.value = reportData.simulation_id
-      
-      if (simulationId.value) {
-        // 获取 simulation 信息
-        const simRes = await getSimulation(simulationId.value)
-        if (simRes.success && simRes.data) {
-          const simData = simRes.data
-          
-          // 获取 project 信息
-          if (simData.project_id) {
-            const projRes = await getProject(simData.project_id)
-            if (projRes.success && projRes.data) {
-              projectData.value = projRes.data
-              addLog(`Project loaded: ${projRes.data.project_id}`)
-              
-              // 获取 graph 数据
-              if (projRes.data.graph_id) {
-                await loadGraph(projRes.data.graph_id)
-              }
-            }
-          }
-        }
+
+      if (shouldRenderGraphPanel.value) {
+        void ensureGraphContextLoaded()
       }
     } else {
       addLog(`Failed to fetch report info: ${reportRes.error || 'Unknown error'}`)
     }
   } catch (err) {
     addLog(`Load error: ${err.message}`)
+  }
+}
+
+const ensureGraphContextLoaded = async () => {
+  if (!simulationId.value || graphContextLoaded.value || graphContextLoading.value) return
+
+  graphContextLoading.value = true
+  graphLoadError.value = ''
+
+  try {
+    const simRes = await getSimulation(simulationId.value)
+    if (!(simRes.success && simRes.data)) {
+      throw new Error(simRes.error || 'Failed to load simulation details')
+    }
+
+    const simData = simRes.data
+    if (!simData.project_id) {
+      graphContextLoaded.value = true
+      return
+    }
+
+    const projRes = await getProject(simData.project_id)
+    if (!(projRes.success && projRes.data)) {
+      throw new Error(projRes.error || 'Failed to load project details')
+    }
+
+    projectData.value = projRes.data
+    graphContextLoaded.value = true
+    addLog(`Project loaded: ${projRes.data.project_id}`)
+
+    if (projRes.data.graph_id) {
+      await loadGraph(projRes.data.graph_id)
+    }
+  } catch (err) {
+    graphLoadError.value = err.message
+    addLog(`Failed to load graph context: ${err.message}`)
+  } finally {
+    graphContextLoading.value = false
   }
 }
 
@@ -224,24 +248,33 @@ const loadGraph = async (graphId) => {
   }
 }
 
-const refreshGraph = () => {
+const refreshGraph = async () => {
+  await ensureGraphContextLoaded()
+
   if (projectData.value?.graph_id) {
     loadGraph(projectData.value.graph_id)
   }
 }
 
+watch(shouldRenderGraphPanel, (shouldRender) => {
+  if (shouldRender) {
+    void ensureGraphContextLoaded()
+  }
+})
+
 // Watch route params
 watch(() => route.params.reportId, (newId) => {
   if (newId && newId !== currentReportId.value) {
     currentReportId.value = newId
+    projectData.value = null
+    graphData.value = null
+    graphLoading.value = false
+    graphContextLoading.value = false
+    graphContextLoaded.value = false
+    graphLoadError.value = ''
     loadReportData()
   }
 }, { immediate: true })
-
-onMounted(() => {
-  addLog('ReportView initialized')
-  loadReportData()
-})
 </script>
 
 <style scoped>
