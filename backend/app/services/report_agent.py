@@ -663,6 +663,7 @@ Focus on what develops inside this configured scenario. The simulation results a
    - If evidence is insufficient, say so clearly
    - Scope every claim to the evidence you actually retrieved
    - If retrieved facts mention only one actor, platform, round, or event thread, keep the claim at that exact scope
+   - If you mention a concrete action with an actor, platform, round, or action type, quote or restate only combinations that appear explicitly in the retrieved facts
    - Do not turn one or two facts into broad claims about "all actors", "the whole network", "power shifts", coordination, or causality unless multiple retrieved facts explicitly support that conclusion
    - Ignore unrelated names, entities, or relationships that appear in tool output unless they clearly matter to the current section
 
@@ -811,6 +812,7 @@ Tools used: {tool_calls_count}/{max_tool_calls} (used so far: {used_tools_str}){
 - If you still need evidence, call one more tool
 - Read any `diagnostics` fields carefully. If fallback was used or evidence is sparse, say that explicitly and do not overclaim.
 - Scope claims to the facts shown here only. Do not generalize to other actors, platforms, rounds, or power dynamics unless the retrieved evidence explicitly shows them.
+- If you describe a concrete action, keep the actor/platform/round/action combination exactly aligned with the explicit retrieved fact lines above.
 - If you have only partial evidence, write that the evidence is limited instead of filling in the gaps.
 ═══════════════════════════════════════════════════════════════"""
 
@@ -930,6 +932,7 @@ class ReportAgent:
         self.report_logger: Optional[ReportLogger] = None
         # 控制台日志记录器（在 generate_report 中初始化）
         self.console_logger: Optional[ReportConsoleLogger] = None
+        self._section_grounding_contexts: Dict[int, Dict[str, Any]] = {}
         
         logger.info(
             f"ReportAgent 初始化完成: graph_id={graph_id}, simulation_id={simulation_id}, backend={self.graph_backend}"
@@ -1139,6 +1142,289 @@ class ReportAgent:
                 grounded_lines.append(text)
                 seen.add(text)
         return grounded_lines
+
+    def _extract_explicit_action_records(self, grounded_lines: List[str]) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        seen = set()
+        bracket_pattern = re.compile(
+            r"\[round\s*(?P<round>\d+)\]\s*\[(?P<platform>twitter|reddit)\]\s*(?P<actor>.+?)\s+(?P<action>[A-Z_]{3,})\b",
+        )
+        natural_pattern = re.compile(
+            r"\[round\s*(?P<round>\d+)\]\s*\[(?P<platform>twitter|reddit)\]\s*(?P<actor>.+?)\s+(?P<verb>posted|commented|replied|quoted|reposted|retweeted|shared)\b",
+            re.IGNORECASE,
+        )
+        verb_to_action = {
+            "posted": "CREATE_POST",
+            "commented": "CREATE_COMMENT",
+            "replied": "CREATE_COMMENT",
+            "quoted": "QUOTE_POST",
+            "reposted": "QUOTE_POST",
+            "retweeted": "QUOTE_POST",
+            "shared": "QUOTE_POST",
+        }
+
+        for raw_line in grounded_lines:
+            line = self._normalize_tool_fact(raw_line)
+            if not line:
+                continue
+
+            match = bracket_pattern.search(line)
+            action_type = None
+            if match:
+                action_type = match.group("action").upper()
+            else:
+                match = natural_pattern.search(line)
+                if match:
+                    action_type = verb_to_action.get(match.group("verb").lower())
+
+            if not match or not action_type:
+                continue
+
+            actor = self._normalize_tool_fact(match.group("actor")).strip("\"'“”")
+            platform = match.group("platform").lower()
+            round_num = int(match.group("round"))
+            key = (actor.lower(), platform, round_num, action_type)
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append({
+                "actor": actor,
+                "actor_key": actor.lower(),
+                "platform": platform,
+                "round": round_num,
+                "action_type": action_type,
+                "raw": line,
+            })
+        return records
+
+    def _build_section_grounding_context(self, tool_evidence_records: List[Dict[str, Any]]) -> Dict[str, Any]:
+        grounded_lines = self._collect_grounded_section_lines(tool_evidence_records)
+        return {
+            "grounded_lines": grounded_lines,
+            "explicit_actions": self._extract_explicit_action_records(grounded_lines),
+        }
+
+    def _parse_small_count_token(self, token: str) -> Optional[int]:
+        token = str(token or "").strip().lower()
+        if not token:
+            return None
+        if token.isdigit():
+            return int(token)
+        return {
+            "one": 1,
+            "two": 2,
+            "three": 3,
+            "four": 4,
+            "five": 5,
+            "six": 6,
+            "seven": 7,
+            "eight": 8,
+            "nine": 9,
+            "ten": 10,
+        }.get(token)
+
+    def _line_matches_supported_action_enumeration(self, line: str, explicit_actions: List[Dict[str, Any]]) -> bool:
+        normalized = self._normalize_tool_fact(line).replace('> ', '').replace('"', '')
+        pattern = re.compile(
+            r"(?P<actor>[^\(]+?)\s+(?P<action>[A-Z_]{3,})\s*\((?P<platform>Twitter|Reddit),\s*round\s*(?P<round>\d+)\)",
+        )
+        match = pattern.search(normalized)
+        if not match:
+            return False
+
+        actor = self._normalize_tool_fact(match.group("actor")).strip("\"'“”").lower()
+        platform = match.group("platform").lower()
+        round_num = int(match.group("round"))
+        action_type = match.group("action").upper()
+        for record in explicit_actions:
+            if (
+                record.get("actor_key") == actor
+                and record.get("platform") == platform
+                and record.get("round") == round_num
+                and record.get("action_type") == action_type
+            ):
+                return True
+        return False
+
+    def _line_has_unsupported_action_claim(
+        self,
+        line: str,
+        grounded_lines: List[str],
+        explicit_actions: List[Dict[str, Any]],
+    ) -> bool:
+        normalized = self._normalize_tool_fact(line)
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        grounded_lower = {self._normalize_tool_fact(item).lower() for item in grounded_lines}
+
+        for grounded in grounded_lower:
+            if grounded and grounded in lowered:
+                return False
+
+        if self._line_matches_supported_action_enumeration(normalized, explicit_actions):
+            return False
+
+        actor_keys = [record.get("actor_key") for record in explicit_actions if record.get("actor_key")]
+        mentions_known_actor = any(actor_key in lowered for actor_key in actor_keys)
+        action_markers = (
+            "create_post",
+            "create_comment",
+            "quote_post",
+            "reddit",
+            "twitter",
+            "round ",
+            " posted",
+            " commented",
+            " replied",
+            " quoted",
+            " reposted",
+            " retweeted",
+            " shared",
+        )
+        return mentions_known_actor and any(marker in lowered for marker in action_markers)
+
+    def _line_has_unsupported_scope_claim(self, line: str, explicit_actions: List[Dict[str, Any]]) -> bool:
+        lowered = self._normalize_tool_fact(line).lower()
+        if not lowered:
+            return False
+
+        explicit_platforms = {record.get("platform") for record in explicit_actions if record.get("platform")}
+        risky_scope_phrases = [
+            "all actors",
+            "each actor",
+            "every actor",
+            "both platforms",
+            "community-wide",
+            "entire community",
+            "fragmented stakeholder responses",
+            "fragmented responses",
+            "shift in power dynamics",
+            "power dynamics shift",
+            "power shifts",
+        ]
+        if any(phrase in lowered for phrase in risky_scope_phrases):
+            return True
+
+        platform_exclusivity_patterns = {
+            "twitter": [
+                r"\bno\b[^.]*\btwitter\b[^.]*\b(activity|actions|posts|presence)\b",
+                r"\b(confined|exclusive(?:ly)?|solely)\b[^.]*\b(to|on|through)\s+(the\s+)?reddit\b",
+                r"\bonly\s+(on|through)\s+(the\s+)?reddit\b",
+            ],
+            "reddit": [
+                r"\bno\b[^.]*\breddit\b[^.]*\b(activity|actions|posts|presence)\b",
+                r"\b(confined|exclusive(?:ly)?|solely)\b[^.]*\b(to|on|through)\s+(the\s+)?twitter\b",
+                r"\bonly\s+(on|through)\s+(the\s+)?twitter\b",
+            ],
+        }
+        for platform, patterns in platform_exclusivity_patterns.items():
+            if platform in explicit_platforms and any(re.search(pattern, lowered) for pattern in patterns):
+                return True
+
+        actor_count = len({record.get("actor_key") for record in explicit_actions if record.get("actor_key")})
+        platform_count = len({record.get("platform") for record in explicit_actions if record.get("platform")})
+        for pattern, actual in (
+            (r"\b(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+actors?\b", actor_count),
+            (r"\b(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+platforms?\b", platform_count),
+        ):
+            match = re.search(pattern, lowered)
+            if not match:
+                continue
+            claimed = self._parse_small_count_token(match.group(1))
+            if claimed is not None and claimed != actual:
+                return True
+        return False
+
+    def _apply_grounded_section_verifier(self, content: str, tool_evidence_records: List[Dict[str, Any]]) -> str:
+        grounding = self._build_section_grounding_context(tool_evidence_records)
+        grounded_lines = grounding["grounded_lines"]
+        explicit_actions = grounding["explicit_actions"]
+
+        if not content.strip() or not grounded_lines:
+            return content
+
+        retained_lines: List[str] = []
+        removed_any = False
+        pending_blank = False
+
+        for raw_line in content.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                pending_blank = bool(retained_lines)
+                continue
+
+            if self._line_has_unsupported_action_claim(stripped, grounded_lines, explicit_actions) or self._line_has_unsupported_scope_claim(stripped, explicit_actions):
+                removed_any = True
+                continue
+
+            if pending_blank and retained_lines:
+                retained_lines.append("")
+            retained_lines.append(raw_line.rstrip())
+            pending_blank = False
+
+        verified = "\n".join(retained_lines).strip()
+        scope_note = (
+            "No retrieved fact here shows additional actor/platform/round/action combinations or broader "
+            "all-actor scope beyond the explicit facts retained in this section."
+        )
+        if removed_any and verified:
+            if scope_note not in verified:
+                verified = f"{verified}\n\n{scope_note}"
+        if removed_any and not verified:
+            return scope_note
+        return verified or content
+
+    def _format_grounded_name_list(self, items: List[str]) -> str:
+        normalized_items: List[str] = []
+        seen = set()
+        for item in items:
+            clean = self._normalize_tool_fact(item)
+            if not clean:
+                continue
+            key = clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_items.append(clean)
+        if not normalized_items:
+            return "retrieved actors"
+        if len(normalized_items) == 1:
+            return normalized_items[0]
+        if len(normalized_items) == 2:
+            return f"{normalized_items[0]} and {normalized_items[1]}"
+        return f"{', '.join(normalized_items[:-1])}, and {normalized_items[-1]}"
+
+    def _build_grounded_outline_from_sections(self, outline: ReportOutline) -> ReportOutline:
+        explicit_actions: List[Dict[str, Any]] = []
+        for index in sorted(self._section_grounding_contexts):
+            explicit_actions.extend(self._section_grounding_contexts[index].get("explicit_actions", []))
+
+        base_title = self._normalize_tool_fact((outline.title or "").split(":")[0]) or "Simulation Report"
+        outline.title = f"{base_title}: Retrieved Evidence Snapshot"
+
+        if not explicit_actions:
+            outline.summary = (
+                "The retrieved section evidence is limited, so this report keeps its findings at the exact scope "
+                "of the explicit facts retained in each section."
+            )
+            return outline
+
+        actor_names = [record.get("actor") for record in explicit_actions if record.get("actor")]
+        platforms = sorted({record.get("platform") for record in explicit_actions if record.get("platform")})
+        rounds = sorted({record.get("round") for record in explicit_actions if isinstance(record.get("round"), int)})
+
+        actor_phrase = self._format_grounded_name_list(actor_names[:4])
+        platform_phrase = self._format_grounded_name_list([platform.title() for platform in platforms])
+        round_phrase = ""
+        if rounds:
+            round_phrase = f" between rounds {rounds[0]} and {rounds[-1]}" if len(rounds) > 1 else f" in round {rounds[0]}"
+
+        outline.summary = (
+            f"The retrieved section evidence shows a limited snapshot of activity by {actor_phrase} across {platform_phrase}"
+            f"{round_phrase}. Broader conclusions are not supported beyond these explicit retrieved facts."
+        )
+        return outline
 
     def _iter_chat_tool_candidates(self, tool_name: str, result: Any) -> List[Any]:
         if tool_name == "insight_forge":
@@ -2164,6 +2450,12 @@ class ReportAgent:
                         },
                     )
 
+        verified_answer = self._apply_grounded_section_verifier(final_answer, tool_evidence_records)
+        if verified_answer != final_answer:
+            logger.info(f"章节 {section.title} 已应用 grounded verifier，移除了不受支持的具体 claim")
+        final_answer = verified_answer
+        self._section_grounding_contexts[section_index] = self._build_section_grounding_context(tool_evidence_records)
+
         if self.report_logger:
             self.report_logger.log_section_content(
                 section_title=section.title,
@@ -2906,6 +3198,10 @@ class ReportAgent:
                 report_id, "generating", 95, "正在组装完整报告...",
                 completed_sections=completed_section_titles
             )
+
+            outline = self._build_grounded_outline_from_sections(outline)
+            report.outline = outline
+            ReportManager.save_outline(report_id, outline)
             
             # 使用ReportManager组装完整报告
             report.markdown_content = ReportManager.assemble_full_report(report_id, outline)

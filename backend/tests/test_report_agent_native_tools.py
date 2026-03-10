@@ -732,8 +732,122 @@ def test_generate_section_react_injects_narrow_grounding_rules_into_llm_messages
     last_user_message = llm.calls[-1]["messages"][-1]["content"]
 
     assert "If retrieved facts mention only one actor, platform, round, or event thread, keep the claim at that exact scope" in first_system_prompt
+    assert "If you mention a concrete action with an actor, platform, round, or action type" in first_system_prompt
     assert "Do not generalize to other actors, platforms, rounds, or structural outcomes unless those facts are explicitly shown above." in last_user_message
+    assert "keep the actor/platform/round/action combination exactly aligned with the explicit retrieved fact lines above" in last_user_message
     assert "If the evidence is partial, say that it is limited instead of filling in the gaps." in last_user_message
+
+
+def test_grounded_section_verifier_removes_invented_action_lines():
+    module = load_report_agent_module()
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_verifier",
+        simulation_requirement="Analyze official messaging.",
+        llm_client=object(),
+        zep_tools=object(),
+        graph_backend="cognee",
+    )
+
+    content = (
+        'Verified retrieved facts:\n'
+        '> "aria the captain CREATE_POST" (Twitter, round 10)\n'
+        'Boros the Dockmaster QUOTE_POST (Twitter, round 7) widened the rumor.\n'
+        'The evidence is limited to the four actors listed above.'
+    )
+    tool_evidence_records = [{
+        "meaningful": True,
+        "grounded_lines": [
+            "[round 9] [reddit] aria the captain CREATE_COMMENT",
+            "[round 10] [twitter] aria the captain CREATE_POST",
+            "[round 8] [reddit] boros the dockmaster CREATE_POST",
+        ],
+    }]
+
+    verified = agent._apply_grounded_section_verifier(content, tool_evidence_records)
+
+    assert '"aria the captain CREATE_POST" (Twitter, round 10)' in verified
+    assert 'Boros the Dockmaster QUOTE_POST (Twitter, round 7)' not in verified
+    assert 'four actors' not in verified
+    assert 'No retrieved fact here shows additional actor/platform/round/action combinations' in verified
+
+
+def test_grounded_section_verifier_removes_unsupported_platform_exclusivity_claims():
+    module = load_report_agent_module()
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_platform_scope",
+        simulation_requirement="Analyze cross-platform rumor spread.",
+        llm_client=object(),
+        zep_tools=object(),
+        graph_backend="cognee",
+    )
+
+    content = (
+        'The simulation snapshot for round 0 shows four distinct posts created on the Reddit platform.\n'
+        'No corresponding Twitter activity is present in the retrieved evidence.\n'
+        'The available data therefore indicate that the rumor\'s earliest diffusion occurred exclusively through the Reddit community.\n'
+        '> [round 0] [reddit] harbor guild CREATE_POST\n'
+        '> [round 0] [twitter] harbor guild CREATE_POST'
+    )
+    tool_evidence_records = [{
+        "meaningful": True,
+        "grounded_lines": [
+            "[round 0] [reddit] harbor guild CREATE_POST",
+            "[round 0] [twitter] harbor guild CREATE_POST",
+        ],
+    }]
+
+    verified = agent._apply_grounded_section_verifier(content, tool_evidence_records)
+
+    assert 'No corresponding Twitter activity is present' not in verified
+    assert 'exclusively through the Reddit community' not in verified
+    platform_only_claim = agent._apply_grounded_section_verifier(
+        'These posts remain all confined to the Reddit platform.',
+        tool_evidence_records,
+    )
+    assert 'all confined to the Reddit platform' not in platform_only_claim
+    assert 'No retrieved fact here shows additional actor/platform/round/action combinations' in platform_only_claim
+    assert '[round 0] [reddit] harbor guild CREATE_POST' in verified
+    assert '[round 0] [twitter] harbor guild CREATE_POST' in verified
+    assert 'No retrieved fact here shows additional actor/platform/round/action combinations' in verified
+
+
+def test_grounded_outline_is_rewritten_to_evidence_snapshot_summary():
+    module = load_report_agent_module()
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_outline_grounding",
+        simulation_requirement="Analyze official messaging.",
+        llm_client=object(),
+        zep_tools=object(),
+        graph_backend="cognee",
+    )
+    agent._section_grounding_contexts = {
+        0: {
+            "explicit_actions": [
+                {"actor": "Aria the Captain", "actor_key": "aria the captain", "platform": "twitter", "round": 10, "action_type": "CREATE_POST"},
+                {"actor": "Boros the Dockmaster", "actor_key": "boros the dockmaster", "platform": "reddit", "round": 8, "action_type": "CREATE_POST"},
+            ]
+        }
+    }
+    outline = module.ReportOutline(
+        title="Harbor Crisis Simulation: Social Tension and Rumor Propagation Analysis",
+        summary="The simulation demonstrates that early rumor spread escalates social tension.",
+        sections=[module.ReportSection(title="Findings")],
+    )
+
+    grounded_outline = agent._build_grounded_outline_from_sections(outline)
+
+    assert grounded_outline.title == "Harbor Crisis Simulation: Retrieved Evidence Snapshot"
+    assert "limited snapshot of activity" in grounded_outline.summary
+    assert "Aria the Captain" in grounded_outline.summary
+    assert "Boros the Dockmaster" in grounded_outline.summary
+    assert "Broader conclusions are not supported" in grounded_outline.summary
+    assert "escalates social tension" not in grounded_outline.summary
 
 
 def test_chat_returns_only_retrieved_facts_when_tool_results_exist():
