@@ -850,6 +850,83 @@ def test_grounded_outline_is_rewritten_to_evidence_snapshot_summary():
     assert "escalates social tension" not in grounded_outline.summary
 
 
+def test_grounded_outline_uses_limited_summary_when_explicit_actions_are_missing():
+    module = load_report_agent_module()
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_outline_sparse",
+        simulation_requirement="Analyze official messaging.",
+        llm_client=object(),
+        zep_tools=object(),
+        graph_backend="cognee",
+    )
+    agent._section_grounding_contexts = {
+        0: {
+            "grounded_lines": ["WorldRule: Merchants panic quickly when succession looks unstable"],
+            "explicit_actions": [],
+        }
+    }
+    outline = module.ReportOutline(
+        title="Harbor Crisis Simulation: Citywide Panic Escalation Analysis",
+        summary="The simulation proves that panic spread across the entire city.",
+        sections=[module.ReportSection(title="Findings")],
+    )
+
+    grounded_outline = agent._build_grounded_outline_from_sections(outline)
+
+    assert grounded_outline.title == "Harbor Crisis Simulation: Retrieved Evidence Snapshot"
+    assert "retrieved section evidence is limited" in grounded_outline.summary
+    assert "proves that panic spread across the entire city" not in grounded_outline.summary
+
+
+def test_grounded_report_post_pass_rechecks_assembled_section_bodies():
+    module = load_report_agent_module()
+
+    agent = module.ReportAgent(
+        graph_id="g1",
+        simulation_id="sim_report_post_pass",
+        simulation_requirement="Analyze official messaging.",
+        llm_client=object(),
+        zep_tools=object(),
+        graph_backend="cognee",
+    )
+    agent._section_grounding_contexts = {
+        0: {
+            "grounded_lines": [
+                "[round 10] [twitter] aria the captain CREATE_POST",
+                "[round 8] [reddit] boros the dockmaster CREATE_POST",
+            ],
+            "explicit_actions": [
+                {"actor": "Aria the Captain", "actor_key": "aria the captain", "platform": "twitter", "round": 10, "action_type": "CREATE_POST"},
+                {"actor": "Boros the Dockmaster", "actor_key": "boros the dockmaster", "platform": "reddit", "round": 8, "action_type": "CREATE_POST"},
+            ],
+        }
+    }
+    outline = module.ReportOutline(
+        title="Harbor Crisis Simulation: Retrieved Evidence Snapshot",
+        summary="The retrieved section evidence shows a limited snapshot of activity.",
+        sections=[module.ReportSection(title="Findings")],
+    )
+    report_markdown = (
+        "# Harbor Crisis Simulation: Retrieved Evidence Snapshot\n\n"
+        "> The retrieved section evidence shows a limited snapshot of activity.\n\n"
+        "---\n\n"
+        "## Findings\n\n"
+        'Verified retrieved facts:\n'
+        '> "aria the captain CREATE_POST" (Twitter, round 10)\n'
+        'Boros the Dockmaster QUOTE_POST (Twitter, round 7) widened the rumor.\n'
+        'The evidence is limited to the four actors listed above.\n'
+    )
+
+    verified = agent._apply_grounded_report_post_pass(report_markdown, outline)
+
+    assert verified.startswith("# Harbor Crisis Simulation: Retrieved Evidence Snapshot")
+    assert 'Boros the Dockmaster QUOTE_POST (Twitter, round 7)' not in verified
+    assert 'four actors' not in verified
+    assert 'No retrieved fact here shows additional actor/platform/round/action combinations' in verified
+
+
 def test_chat_returns_only_retrieved_facts_when_tool_results_exist():
     module = load_report_agent_module()
 

@@ -415,6 +415,88 @@ def test_start_simulation_rejects_restart_while_process_still_alive(tmp_path):
         raise AssertionError("expected start_simulation to reject overlapping restart")
 
 
+def test_start_simulation_recovers_stale_dead_process_after_restart(tmp_path):
+    module = load_simulation_runner_module()
+    runner = module.SimulationRunner
+    runner.RUN_STATE_DIR = str(tmp_path)
+    runner.SCRIPTS_DIR = str(tmp_path / "scripts")
+    runner._run_states.clear()
+    runner._processes.clear()
+    runner._action_queues.clear()
+    runner._monitor_threads.clear()
+    runner._stdout_files.clear()
+    runner._stderr_files.clear()
+
+    sim_dir = tmp_path / "sim_restartable"
+    sim_dir.mkdir()
+    scripts_dir = Path(runner.SCRIPTS_DIR)
+    scripts_dir.mkdir()
+    (scripts_dir / "run_twitter_simulation.py").write_text("# twitter\n", encoding="utf-8")
+
+    (sim_dir / "state.json").write_text(json.dumps({
+        "simulation_id": "sim_restartable",
+        "enable_twitter": True,
+        "enable_reddit": False,
+        "status": "running",
+    }), encoding="utf-8")
+    (sim_dir / "simulation_config.json").write_text(json.dumps({
+        "time_config": {
+            "total_simulation_hours": 24,
+            "minutes_per_round": 60,
+        }
+    }), encoding="utf-8")
+    (sim_dir / "run_state.json").write_text(json.dumps({
+        "simulation_id": "sim_restartable",
+        "runner_status": "running",
+        "current_round": 5,
+        "total_rounds": 24,
+        "twitter_running": True,
+        "reddit_running": False,
+        "process_pid": 717171,
+        "updated_at": "2026-03-09T00:00:00",
+    }), encoding="utf-8")
+
+    launched = {}
+
+    class FakeProcess:
+        def __init__(self, cmd, **kwargs):
+            launched["cmd"] = cmd
+            launched["cwd"] = kwargs.get("cwd")
+            self.pid = 818181
+
+        def poll(self):
+            return None
+
+    class FakeThread:
+        def __init__(self, target=None, args=None, daemon=None):
+            self.target = target
+            self.args = args or ()
+
+        def start(self):
+            launched["monitor_started"] = True
+
+    module.subprocess.Popen = FakeProcess
+    module.threading.Thread = FakeThread
+    runner._is_pid_alive = classmethod(lambda cls, pid: False)
+
+    state = runner.start_simulation("sim_restartable", platform="parallel")
+
+    assert Path(launched["cmd"][1]).name == "run_twitter_simulation.py"
+    assert launched["cwd"] == str(sim_dir)
+    assert launched["monitor_started"] is True
+    assert state.runner_status == module.RunnerStatus.RUNNING
+    assert state.process_pid == 818181
+    assert state.twitter_running is True
+    assert state.reddit_running is False
+
+    synced_state = json.loads((sim_dir / "state.json").read_text(encoding="utf-8"))
+    synced_run_state = json.loads((sim_dir / "run_state.json").read_text(encoding="utf-8"))
+
+    assert synced_state["status"] == "stopped"
+    assert synced_run_state["runner_status"] == "running"
+    assert synced_run_state["process_pid"] == 818181
+
+
 def test_read_action_log_marks_platform_completed_without_finishing_live_runner(tmp_path):
     module = load_simulation_runner_module()
     runner = module.SimulationRunner
@@ -456,8 +538,8 @@ def test_read_action_log_marks_platform_completed_without_finishing_live_runner(
     assert state.twitter_running is False
     assert state.runner_status == module.RunnerStatus.RUNNING
     assert state.completed_at is None
-    assert sum("Twitter 模拟已完成" in msg for msg in messages) == 1
-    assert sum("所有平台模拟已完成" in msg for msg in messages) == 1
+    assert sum("Twitter simulation completed" in msg for msg in messages) == 1
+    assert sum("All enabled platform simulations completed" in msg for msg in messages) == 1
 
 
 def test_get_public_run_state_dict_marks_waiting_completed_for_read_path(tmp_path):
